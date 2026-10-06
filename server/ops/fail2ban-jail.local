@@ -1,0 +1,13 @@
+[DEFAULT]
+# На сервере включён вход root по паролю, а в auth.log за двое суток
+# скопилось >20 000 неудачных попыток. Баним агрессивно, но обратимо.
+ignoreip = 127.0.0.1/8 ::1
+bantime = 2h
+findtime = 10m
+maxretry = 4
+backend = systemd
+
+[sshd]
+enabled = true
+port = ssh
+mode = aggressive

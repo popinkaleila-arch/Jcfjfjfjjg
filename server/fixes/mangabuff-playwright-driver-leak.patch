@@ -1,0 +1,85 @@
+--- a/services/mangabuff_service.py
++++ b/services/mangabuff_service.py
+@@ -1183,34 +1183,42 @@
+             self.user_data_dir,
+         )
+         self._playwright = await async_playwright().start()
+-        self._context = await self._playwright.chromium.launch_persistent_context(
+-            user_data_dir=str(self.user_data_dir),
+-            headless=headless,
+-            viewport={
+-                "width": self.config.viewport_width,
+-                "height": self.config.viewport_height,
+-            },
+-            user_agent=self.config.user_agent,
+-            locale="ru-RU",
+-            timezone_id="Europe/Moscow",
+-            args=[
+-                "--disable-blink-features=AutomationControlled",
+-                "--no-sandbox",
+-                "--disable-dev-shm-usage",
+-            ],
+-            ignore_default_args=["--enable-automation"],
+-        )
+-        self._page = (
+-            self._context.pages[0]
+-            if self._context.pages
+-            else await self._context.new_page()
+-        )
+-        self._page.set_default_timeout(self.config.selector_timeout_ms)
++        try:
++            self._context = await self._playwright.chromium.launch_persistent_context(
++                user_data_dir=str(self.user_data_dir),
++                headless=headless,
++                viewport={
++                    "width": self.config.viewport_width,
++                    "height": self.config.viewport_height,
++                },
++                user_agent=self.config.user_agent,
++                locale="ru-RU",
++                timezone_id="Europe/Moscow",
++                args=[
++                    "--disable-blink-features=AutomationControlled",
++                    "--no-sandbox",
++                    "--disable-dev-shm-usage",
++                ],
++                ignore_default_args=["--enable-automation"],
++            )
++            self._page = (
++                self._context.pages[0]
++                if self._context.pages
++                else await self._context.new_page()
++            )
++            self._page.set_default_timeout(self.config.selector_timeout_ms)
++        except BaseException:
++            await self._discard_playwright()
++            raise
+         self._started = True
+ 
+-    async def stop(self) -> None:
+-        self._stop_flag.set()
+-        self.stats.running = False
++    async def _discard_playwright(self) -> None:
++        """Снять контекст и node-драйвер Playwright, не трогая флаги задачи.
++
++        Вызывается при сбое start(): без этого каждая неудачная попытка
++        запуска оставляет висеть процесс драйвера, и за сутки они съедают
++        всю память машины.
++        """
+         try:
+             if self._context is not None:
+                 await self._context.close()
+@@ -1227,7 +1235,12 @@
+         finally:
+             self._playwright = None
+             self._started = False
+-            logger.info("MangaBuff: остановлен.")
++
++    async def stop(self) -> None:
++        self._stop_flag.set()
++        self.stats.running = False
++        await self._discard_playwright()
++        logger.info("MangaBuff: остановлен.")
+ 
+     def request_stop(self) -> None:
+         self._stop_flag.set()

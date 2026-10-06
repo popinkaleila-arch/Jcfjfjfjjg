@@ -1,0 +1,32 @@
+/root/dwar_bot/logs/*.log {
+    daily
+    rotate 5
+    size 20M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+
+/root/Hikka/hikka.log {
+    daily
+    rotate 3
+    size 20M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+
+/root/remanga_autobattle/logs/*.log {
+    daily
+    rotate 5
+    size 20M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

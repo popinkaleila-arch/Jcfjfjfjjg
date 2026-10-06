@@ -1,0 +1,42 @@
+--- a/services/mangabuff_service.py
++++ b/services/mangabuff_service.py
+@@ -1497,6 +1497,31 @@
+         except Exception:  # noqa: BLE001
+             pass
+ 
++    async def _clear_login_overlays(self, page: Page) -> None:
++        """Снять оверлеи, перехватывающие клик по кнопке входа на /login.
++
++        На странице живут сразу две формы входа: видимая на самой странице и
++        её копия внутри #modal-auth. Модалка открыта (modal--open), размеры у
++        её полей нулевые, но поддерево перехватывает указатель — клик по
++        видимой кнопке уходил в таймаут. Плюс снизу висит баннер
++        #modal-tenor без кнопки закрытия.
++
++        Вызывается только в логине, поэтому модалки награды не затрагивает.
++        """
++        try:
++            await page.evaluate(
++                """() => {
++                  for (const el of document.querySelectorAll(
++                    '#modal-tenor, #modal-auth, .modal--fixed-bottom'
++                  )) {
++                    el.classList.remove('modal--open');
++                    el.style.display = 'none';
++                  }
++                }"""
++            )
++        except Exception:  # noqa: BLE001
++            pass
++
+     async def _safe_goto(self, page: Page, url: str) -> bool:
+         try:
+             tier = self._tempo_tier()
+@@ -1711,6 +1736,7 @@
+             await self._human_pause(0.3, 0.7)
+             await pwd.fill(self.password, timeout=8000)
+             await self._human_pause(0.4, 0.9)
++            await self._clear_login_overlays(page)
+             await page.locator("button.login-button").first.click(timeout=8000)
+             await self._human_pause(2.0, 3.5)
+             await self._dismiss_overlays(page)
