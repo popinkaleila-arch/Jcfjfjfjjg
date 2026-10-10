@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+from dataclasses import dataclass, field
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified, RPCError
 
@@ -11,12 +12,23 @@ import config
 from bot_editor import BotEditor
 from bridge import UserbotBridge
 from database import Database, Window
-from formatting import compose_dest_caption
+from formatting import compose_dest_caption, media_fingerprint
 from transfer_filters import album_is_clean, should_skip
 
 CAPTION_LIMIT = 1024
+BACKFILL_MAX = 500
+SOURCE_INDEX_LIMIT = 3000
 
 log = logging.getLogger("poster")
+
+
+@dataclass
+class BackfillResult:
+    scanned: int = 0
+    updated: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 class Poster:
@@ -24,6 +36,7 @@ class Poster:
         self.db = db
         self.bridge = bridge
         self.editor = editor
+        self.backfill_running = False
 
     async def run_window(self, window: Window) -> int:
         if self.bridge.stop_cycle.is_set():
@@ -198,6 +211,123 @@ class Poster:
         except Exception as exc:
             log.warning("бот не смог проставить подпись: %s", exc)
             return html
+
+    async def _source_index(self, source: str) -> dict[str, object]:
+        index: dict[str, object] = {}
+        if not self.bridge.logged_in() or self.bridge.client is None or not source:
+            return index
+        scanned = 0
+        async for message in self.bridge.client.get_chat_history(source):
+            key = media_fingerprint(message)
+            if key and key not in index:
+                index[key] = message
+            scanned += 1
+            if scanned >= SOURCE_INDEX_LIMIT:
+                break
+        return index
+
+    async def backfill_existing(
+        self,
+        window: Window,
+        limit: int = 100,
+        min_id: int = 0,
+        progress=None,
+    ) -> BackfillResult:
+        if self.backfill_running:
+            raise RuntimeError("правка существующих постов уже идёт")
+        if not self.editor:
+            raise RuntimeError("редактор бота не подключён")
+        if not window.dest:
+            raise RuntimeError("сначала укажите назначение")
+        limit = max(1, min(int(limit), BACKFILL_MAX))
+        self.backfill_running = True
+        result = BackfillResult()
+        try:
+            rights = await self.editor.check_rights(window.dest)
+            if not rights.ok:
+                raise RuntimeError(rights.detail)
+            if not self.bridge.logged_in() or self.bridge.client is None:
+                raise RuntimeError("чтобы пройти уже залитые посты, войдите в юзербота")
+            source_map = await self._source_index(window.source) if window.source else {}
+            seen_groups: set[str] = set()
+            async for message in self.bridge.client.get_chat_history(window.dest):
+                if message.id < min_id:
+                    break
+                result.scanned += 1
+                group = getattr(message, "media_group_id", None)
+                if group:
+                    if group in seen_groups:
+                        result.skipped += 1
+                        if result.scanned >= limit:
+                            break
+                        continue
+                    seen_groups.add(group)
+                source = source_map.get(media_fingerprint(message) or "")
+                html = compose_dest_caption(window.caption, source)
+                if not html:
+                    result.skipped += 1
+                else:
+                    try:
+                        await self.editor.edit_caption(window.dest, message.id, html)
+                        await self._remember(window, message.id, getattr(source, "id", None), html)
+                        result.updated += 1
+                    except Exception as exc:
+                        result.failed += 1
+                        if len(result.errors) < 8:
+                            result.errors.append(f"{message.id}: {exc}")
+                        log.warning("backfill %s: %s", message.id, exc)
+                    await asyncio.sleep(0.35)
+                if progress and result.scanned % 40 == 0:
+                    await progress(result)
+                if result.scanned >= limit:
+                    break
+            return result
+        finally:
+            self.backfill_running = False
+
+    async def backfill_id_range(
+        self,
+        window: Window,
+        start_id: int,
+        count: int,
+        progress=None,
+    ) -> BackfillResult:
+        if self.backfill_running:
+            raise RuntimeError("правка существующих постов уже идёт")
+        if not self.editor:
+            raise RuntimeError("редактор бота не подключён")
+        if not window.dest:
+            raise RuntimeError("сначала укажите назначение")
+        html = compose_dest_caption(window.caption, None)
+        if not html:
+            raise RuntimeError("задайте ✏️ Описание — без юзербота бот может проставить только шаблон")
+        count = max(1, min(int(count), BACKFILL_MAX))
+        rights = await self.editor.check_rights(window.dest)
+        if not rights.ok:
+            raise RuntimeError(rights.detail)
+        self.backfill_running = True
+        result = BackfillResult()
+        try:
+            for message_id in range(int(start_id), int(start_id) + count):
+                result.scanned += 1
+                try:
+                    await self.editor.edit_caption(window.dest, message_id, html)
+                    await self._remember(window, message_id, None, html)
+                    result.updated += 1
+                except Exception as exc:
+                    text = str(exc).lower()
+                    if "не найден" in text or "not found" in text:
+                        result.skipped += 1
+                    else:
+                        result.failed += 1
+                        if len(result.errors) < 8:
+                            result.errors.append(f"{message_id}: {exc}")
+                await asyncio.sleep(0.35)
+                if progress and result.scanned % 40 == 0:
+                    await progress(result)
+            return result
+        finally:
+            self.backfill_running = False
 
     async def edit_caption(self, chat: str, message_id: int, caption: str, prefer_bot: bool = True) -> str:
         text = caption or ""

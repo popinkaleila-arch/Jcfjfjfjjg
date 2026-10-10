@@ -46,6 +46,7 @@ class Form(StatesGroup):
     start_link = State()
     edit_pick = State()
     edit_text = State()
+    backfill = State()
 
 
 def keyboard() -> ReplyKeyboardMarkup:
@@ -54,8 +55,9 @@ def keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔐 Вход юзербота"), KeyboardButton(text="📊 Статус")],
             [KeyboardButton(text="📥 Источник"), KeyboardButton(text="📤 Назначение"), KeyboardButton(text="⭐ Избранное")],
             [KeyboardButton(text="🔗 Старт-ссылка"), KeyboardButton(text="📜 С начала"), KeyboardButton(text="✏️ Описание")],
-            [KeyboardButton(text="🖊 Правка поста"), KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит")],
-            [KeyboardButton(text="🧹 Чистый перелив"), KeyboardButton(text="🤖 Бот правит подписи")],
+            [KeyboardButton(text="🖊 Правка поста"), KeyboardButton(text="🖊 Существующие")],
+            [KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит"), KeyboardButton(text="🧹 Чистый перелив")],
+            [KeyboardButton(text="🤖 Бот правит подписи")],
             [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="⏹ Стоп")],
             [KeyboardButton(text="🪟 Окна"), KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📋 Клон"), KeyboardButton(text="▶️ Старт все")],
         ],
@@ -476,6 +478,103 @@ async def apply_edit_post(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(f"{result}\n{format_post_link(str(dest), int(dest_msg_id))}", reply_markup=keyboard())
+
+
+def _backfill_text(result) -> str:
+    lines = [
+        f"готово: просмотрено {result.scanned}",
+        f"обновлено {result.updated}",
+        f"пропущено {result.skipped}",
+        f"ошибок {result.failed}",
+    ]
+    if result.errors:
+        lines.append("первые ошибки:")
+        lines.extend(result.errors[:5])
+    return "\n".join(lines)
+
+
+@router.message(Command("backfill"))
+@router.message(F.text == "🖊 Существующие")
+async def ask_backfill(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, _auth, poster, editor = _ctx(message)
+    win = await db.current_window()
+    if not win.dest:
+        await message.answer("сначала укажите 📤 Назначение")
+        return
+    if poster.backfill_running:
+        await message.answer("правка существующих уже идёт")
+        return
+    rights_line = ""
+    if editor:
+        rights = await editor.check_rights(win.dest)
+        if not rights.ok:
+            await message.answer(f"бот не может править этот канал.\n{rights.detail}")
+            return
+        rights_line = f"\nправа бота: {rights.detail}"
+    await state.set_state(Form.backfill)
+    mode = "юзербот снимет посты и подтянет исходное форматирование" if bridge.logged_in() else "юзербота нет — нужен шаблон ✏️ Описание и ссылка на пост в назначении"
+    await message.answer(
+        "проставлю описания уже залитым постам через бота-админа.\n"
+        f"{mode}{rights_line}\n\n"
+        "отправьте:\n"
+        "• число — сколько последних постов (например 50)\n"
+        "• «все» — до 500 последних\n"
+        "• ссылку или пересланный пост назначения — от него до свежих\n"
+        "/cancel — отмена"
+    )
+
+
+@router.message(Form.backfill)
+async def run_backfill(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, _auth, poster, _editor = _ctx(message)
+    win = await db.current_window()
+    text = (message.text or "").strip()
+    point = forwarded_point(message)
+    status = await message.answer("смотрю существующие посты…")
+
+    async def progress(result) -> None:
+        try:
+            await status.edit_text(
+                f"иду: {result.scanned} просмотрено, {result.updated} обновлено, ошибок {result.failed}"
+            )
+        except Exception:
+            pass
+
+    try:
+        if point or (text and "t.me/" in text.lower()):
+            if not point:
+                parsed = parse_start_link(text)
+                dest, start_id = parsed.chat, parsed.message_id
+            else:
+                dest, start_id = point.chat, point.message_id
+            if dest and dest != win.dest:
+                await db.update_window(win.id, dest=dest)
+                win = await db.current_window()
+            if bridge.logged_in():
+                result = await poster.backfill_existing(win, limit=500, min_id=start_id, progress=progress)
+            else:
+                result = await poster.backfill_id_range(win, start_id, 100, progress=progress)
+        elif text.lower() in {"все", "all"}:
+            result = await poster.backfill_existing(win, limit=500, progress=progress)
+        elif text.isdigit():
+            result = await poster.backfill_existing(win, limit=int(text), progress=progress)
+        else:
+            await state.set_state(Form.backfill)
+            await message.answer("нужно число, «все», ссылка или пересланный пост")
+            return
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    except Exception as exc:
+        await state.clear()
+        await message.answer(f"не вышло: {exc}", reply_markup=keyboard())
+        return
+    await state.clear()
+    await message.answer(_backfill_text(result), reply_markup=keyboard())
 
 
 @router.message(F.text == "⏱ Интервал")
