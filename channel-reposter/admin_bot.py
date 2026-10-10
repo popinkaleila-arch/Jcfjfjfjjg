@@ -498,43 +498,93 @@ def _backfill_text(result) -> str:
 async def ask_backfill(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    db, bridge, _auth, poster, editor = _ctx(message)
+    db, _bridge, _auth, poster, editor = _ctx(message)
     win = await db.current_window()
-    if not win.dest:
-        await message.answer("сначала укажите 📤 Назначение")
-        return
     if poster.backfill_running:
         await message.answer("правка существующих уже идёт")
         return
-    rights_line = ""
-    if editor:
+    if win.dest and editor:
         rights = await editor.check_rights(win.dest)
         if not rights.ok:
-            await message.answer(f"бот не может править этот канал.\n{rights.detail}")
+            await message.answer(
+                "бот ещё не может править этот канал — юзербот не нужен, нужна только админка бота.\n"
+                f"{rights.detail}"
+            )
             return
-        rights_line = f"\nправа бота: {rights.detail}"
     await state.set_state(Form.backfill)
-    mode = "юзербот снимет посты и подтянет исходное форматирование" if bridge.logged_in() else "юзербота нет — нужен шаблон ✏️ Описание и ссылка на пост в назначении"
+    await state.update_data(bf_caption="", bf_start=0, bf_limit=500)
+    hint = "есть шаблон ✏️ Описание — можно сразу прислать пост" if win.caption else "шаблона нет — сначала пришлите новое описание"
     await message.answer(
-        "проставлю описания уже залитым постам через бота-админа.\n"
-        f"{mode}{rights_line}\n\n"
-        "отправьте:\n"
-        "• число — сколько последних постов (например 50)\n"
-        "• «все» — до 500 последних\n"
-        "• ссылку или пересланный пост назначения — от него до свежих\n"
+        "правлю уже залитые посты только через этого бота, без юзербота.\n"
+        f"{hint}\n\n"
+        "1) пришлите новое описание (жирный, ссылки и т.д. сохранятся) или напишите «шаблон»\n"
+        "2) перешлите любой пост из канала-назначения или ссылку t.me/…/123\n"
+        "по желанию число — сколько постов максимум (по умолчанию 500, «все» — 800)\n"
         "/cancel — отмена"
     )
 
 
 @router.message(Form.backfill)
-async def run_backfill(message: Message, state: FSMContext) -> None:
+async def collect_backfill(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    db, bridge, _auth, poster, _editor = _ctx(message)
+    db, _bridge, _auth, poster, editor = _ctx(message)
     win = await db.current_window()
+    data = await state.get_data()
+    caption = data.get("bf_caption") or ""
+    start_id = int(data.get("bf_start") or 0)
+    limit = int(data.get("bf_limit") or 500)
     text = (message.text or "").strip()
     point = forwarded_point(message)
-    status = await message.answer("смотрю существующие посты…")
+
+    if point or (text and "t.me/" in text.lower()):
+        if not point:
+            parsed = parse_start_link(text)
+            dest, start_id = parsed.chat, parsed.message_id
+        else:
+            dest, start_id = point.chat, point.message_id
+        if dest and dest != win.dest:
+            await db.update_window(win.id, dest=dest)
+            win = await db.current_window()
+        await state.update_data(bf_start=start_id)
+        if editor and win.dest:
+            rights = await editor.check_rights(win.dest)
+            if not rights.ok:
+                await message.answer(f"бот не админ этого канала.\n{rights.detail}")
+                return
+    elif text.lower() in {"шаблон", "описание"}:
+        if not win.caption:
+            await message.answer("шаблон пустой — пришлите текст описания сообщением")
+            return
+        caption = win.caption
+        await state.update_data(bf_caption=caption)
+    elif text.lower() in {"все", "all"}:
+        limit = 800
+        await state.update_data(bf_limit=limit)
+    elif text.isdigit():
+        limit = max(1, min(int(text), 800))
+        await state.update_data(bf_limit=limit)
+    elif text or message.caption:
+        caption = message_to_html(message)
+        await state.update_data(bf_caption=caption)
+    else:
+        await message.answer("нужны описание и ссылка/пересланный пост из назначения")
+        return
+
+    if not caption:
+        caption = win.caption
+    if not start_id:
+        await message.answer(
+            "описание есть. теперь перешлите любой пост из канала или пришлите ссылку на него."
+            if caption
+            else "пришлите описание (с форматированием) или «шаблон», затем ссылку на пост."
+        )
+        return
+    if not caption:
+        await message.answer("есть пост. теперь пришлите новое описание или «шаблон».")
+        return
+
+    status = await message.answer("правлю существующие посты через бота…")
 
     async def progress(result) -> None:
         try:
@@ -545,30 +595,7 @@ async def run_backfill(message: Message, state: FSMContext) -> None:
             pass
 
     try:
-        if point or (text and "t.me/" in text.lower()):
-            if not point:
-                parsed = parse_start_link(text)
-                dest, start_id = parsed.chat, parsed.message_id
-            else:
-                dest, start_id = point.chat, point.message_id
-            if dest and dest != win.dest:
-                await db.update_window(win.id, dest=dest)
-                win = await db.current_window()
-            if bridge.logged_in():
-                result = await poster.backfill_existing(win, limit=500, min_id=start_id, progress=progress)
-            else:
-                result = await poster.backfill_id_range(win, start_id, 100, progress=progress)
-        elif text.lower() in {"все", "all"}:
-            result = await poster.backfill_existing(win, limit=500, progress=progress)
-        elif text.isdigit():
-            result = await poster.backfill_existing(win, limit=int(text), progress=progress)
-        else:
-            await state.set_state(Form.backfill)
-            await message.answer("нужно число, «все», ссылка или пересланный пост")
-            return
-    except ValueError as exc:
-        await message.answer(str(exc))
-        return
+        result = await poster.backfill_via_bot(win, start_id, caption, limit=limit, progress=progress)
     except Exception as exc:
         await state.clear()
         await message.answer(f"не вышло: {exc}", reply_markup=keyboard())

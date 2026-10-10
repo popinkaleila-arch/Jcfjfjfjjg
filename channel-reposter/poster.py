@@ -16,8 +16,9 @@ from formatting import compose_dest_caption, media_fingerprint
 from transfer_filters import album_is_clean, should_skip
 
 CAPTION_LIMIT = 1024
-BACKFILL_MAX = 500
+BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
+BACKFILL_MISS_STREAK = 18
 
 log = logging.getLogger("poster")
 
@@ -285,11 +286,12 @@ class Poster:
         finally:
             self.backfill_running = False
 
-    async def backfill_id_range(
+    async def backfill_via_bot(
         self,
         window: Window,
         start_id: int,
-        count: int,
+        html: str,
+        limit: int = 500,
         progress=None,
     ) -> BackfillResult:
         if self.backfill_running:
@@ -297,37 +299,71 @@ class Poster:
         if not self.editor:
             raise RuntimeError("редактор бота не подключён")
         if not window.dest:
-            raise RuntimeError("сначала укажите назначение")
-        html = compose_dest_caption(window.caption, None)
-        if not html:
-            raise RuntimeError("задайте ✏️ Описание — без юзербота бот может проставить только шаблон")
-        count = max(1, min(int(count), BACKFILL_MAX))
+            raise RuntimeError("сначала укажите назначение или пришлите ссылку на пост")
+        caption = (html or "").strip()
+        if not caption:
+            raise RuntimeError("пришлите новое описание в бота — юзербот для этого не нужен")
+        if len(caption) > CAPTION_LIMIT:
+            raise RuntimeError(f"подпись длиннее {CAPTION_LIMIT} символов")
         rights = await self.editor.check_rights(window.dest)
         if not rights.ok:
             raise RuntimeError(rights.detail)
+        limit = max(1, min(int(limit), BACKFILL_MAX))
         self.backfill_running = True
         result = BackfillResult()
         try:
-            for message_id in range(int(start_id), int(start_id) + count):
-                result.scanned += 1
-                try:
-                    await self.editor.edit_caption(window.dest, message_id, html)
-                    await self._remember(window, message_id, None, html)
-                    result.updated += 1
-                except Exception as exc:
-                    text = str(exc).lower()
-                    if "не найден" in text or "not found" in text:
-                        result.skipped += 1
-                    else:
-                        result.failed += 1
-                        if len(result.errors) < 8:
-                            result.errors.append(f"{message_id}: {exc}")
-                await asyncio.sleep(0.35)
-                if progress and result.scanned % 40 == 0:
-                    await progress(result)
+            start = max(1, int(start_id))
+            await self._scan_ids(window, caption, range(start, start + 2000), result, limit, progress)
+            if result.updated < limit and start > 1:
+                await self._scan_ids(window, caption, range(start - 1, 0, -1), result, limit, progress)
             return result
         finally:
             self.backfill_running = False
+
+    async def _scan_ids(self, window, caption, ids, result: BackfillResult, limit: int, progress) -> None:
+        miss = 0
+        for message_id in ids:
+            if result.updated >= limit:
+                return
+            kind = await self._edit_one_existing(window, message_id, caption)
+            result.scanned += 1
+            if kind in {"ok", "same"}:
+                result.updated += 1
+                miss = 0
+            elif kind == "miss":
+                result.skipped += 1
+                miss += 1
+            elif kind == "skip":
+                result.skipped += 1
+                miss = 0
+            else:
+                result.failed += 1
+                miss = 0
+                if len(result.errors) < 8:
+                    result.errors.append(f"{message_id}: {kind}")
+            if miss >= BACKFILL_MISS_STREAK:
+                return
+            if progress and result.scanned % 25 == 0:
+                await progress(result)
+            await asyncio.sleep(0.3)
+
+    async def _edit_one_existing(self, window: Window, message_id: int, html: str) -> str:
+        assert self.editor and window.dest
+        try:
+            await self.editor.edit_caption(window.dest, message_id, html)
+            await self._remember(window, message_id, None, html)
+            return "ok"
+        except Exception as exc:
+            text = str(exc).lower()
+            if "не найден" in text or "not found" in text:
+                return "miss"
+            if "тот же" in text or "not modified" in text:
+                return "same"
+            if "не даёт править" in text or "can't be edited" in text:
+                return "skip"
+            if "прав" in text or "administrator" in text or "admin" in text:
+                raise
+            return str(exc)
 
     async def edit_caption(self, chat: str, message_id: int, caption: str, prefer_bot: bool = True) -> str:
         text = caption or ""
