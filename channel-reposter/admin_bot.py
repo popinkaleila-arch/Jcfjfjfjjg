@@ -1,0 +1,534 @@
+from __future__ import annotations
+
+import logging
+import time
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+
+from access import is_admin
+from bridge import UserbotBridge
+from database import Database
+from formatting import message_to_html
+from links import format_chat, format_duration, normalize_chat, parse_duration, parse_start_link
+from poster import Poster
+from scheduling import any_running
+from userbot_auth import AuthError, UserbotAuth
+
+log = logging.getLogger("admin_bot")
+router = Router()
+
+
+class Form(StatesGroup):
+    api_id = State()
+    api_hash = State()
+    phone = State()
+    code = State()
+    password = State()
+    source = State()
+    dest = State()
+    caption = State()
+    interval = State()
+    limit = State()
+    start_link = State()
+
+
+def keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔐 Вход юзербота"), KeyboardButton(text="📊 Статус")],
+            [KeyboardButton(text="📥 Источник"), KeyboardButton(text="📤 Назначение"), KeyboardButton(text="⭐ Избранное")],
+            [KeyboardButton(text="🔗 Старт-ссылка"), KeyboardButton(text="📜 С начала"), KeyboardButton(text="✏️ Описание")],
+            [KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит"), KeyboardButton(text="🧹 Чистый перелив")],
+            [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="⏹ Стоп")],
+            [KeyboardButton(text="🪟 Окна"), KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📋 Клон"), KeyboardButton(text="▶️ Старт все")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _ctx(message: Message) -> tuple[Database, UserbotBridge, UserbotAuth, Poster]:
+    data = message.bot.workflow  # type: ignore[attr-defined]
+    return data["db"], data["bridge"], data["auth"], data["poster"]
+
+
+async def _guard(message: Message) -> bool:
+    db = message.bot.workflow["db"]  # type: ignore[attr-defined]
+    if not await is_admin(db, message):
+        await message.answer("нет доступа")
+        return False
+    return True
+
+
+async def status_text(db: Database, bridge: UserbotBridge) -> str:
+    windows = await db.list_windows()
+    current = await db.current_window()
+    running = any_running(windows)
+    enabled = sum(1 for win in windows if win.enabled and not win.paused)
+    queued = sum(win.queued for win in windows)
+    posted = sum(win.posted_total for win in windows)
+    autopost = "идёт" if running else "пауза"
+    pair = f"{format_chat(current.source)} → {format_chat(current.dest)}"
+    lines = [
+        f"панель @{(await _bot_username(db, bridge))}",
+        f"юзербот: {bridge.status_text()}",
+        f"автопост: {autopost}",
+        f"цикл: {bridge.cycle}",
+        f"окна: {enabled}/{len(windows)}",
+        f"текущее: #{current.id} {pair}",
+        f"интервал: {format_duration(current.interval_seconds)}",
+        f"лимит: {current.posts_per_cycle}",
+        f"фильтр: {'чистый' if current.clean_filter else 'все посты'}",
+        f"очередь≈{queued}  всего={posted}",
+        f"источник: {format_chat(current.source)}",
+        f"назначение: {format_chat(current.dest)}",
+    ]
+    if windows:
+        lines.append("")
+        lines.append("окна:")
+        for win in windows:
+            flag = "▶" if win.enabled and not win.paused else ("⏸" if win.paused else "·")
+            lines.append(
+                f"{flag} #{win.id} {format_chat(win.source)} → {format_chat(win.dest)}  last={win.last_msg_id}"
+            )
+    return "\n".join(lines)
+
+
+async def _bot_username(db: Database, bridge: UserbotBridge) -> str:
+    return "ZzzLV_bot"
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.clear()
+    db, bridge, *_ = _ctx(message)
+    await message.answer(
+        "Channel Reposter — панель управления.\n\n"
+        "1) 🔐 Вход юзербота (api_id, api_hash, телефон, код)\n"
+        "2) 📥 Источник и 📤 Назначение\n"
+        "3) ▶️ Старт\n\n" + await status_text(db, bridge),
+        reply_markup=keyboard(),
+    )
+
+
+@router.message(Command("status"))
+@router.message(F.text == "📊 Статус")
+async def cmd_status(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, *_ = _ctx(message)
+    await message.answer(await status_text(db, bridge), reply_markup=keyboard())
+
+
+@router.message(F.text == "🔐 Вход юзербота")
+async def login_start(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.api_id)
+    await message.answer(
+        "api_id с https://my.telegram.org/apps — отправьте число.\n"
+        "/cancel чтобы отменить."
+    )
+
+
+@router.message(Command("cancel"))
+async def cancel(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.clear()
+    await message.answer("отменено", reply_markup=keyboard())
+
+
+@router.message(Form.api_id)
+async def got_api_id(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.update_data(api_id=(message.text or "").strip())
+    await state.set_state(Form.api_hash)
+    await message.answer("теперь api_hash")
+
+
+@router.message(Form.api_hash)
+async def got_api_hash(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, _bridge, auth, _poster = _ctx(message)
+    data = await state.get_data()
+    try:
+        await auth.save_api(data.get("api_id", ""), (message.text or "").strip())
+    except AuthError as exc:
+        await message.answer(str(exc))
+        return
+    await state.set_state(Form.phone)
+    await message.answer("номер телефона юзербота, например +79001234567")
+
+
+@router.message(Form.phone)
+async def got_phone(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    _db, _bridge, auth, _poster = _ctx(message)
+    try:
+        info = await auth.send_code(message.text or "")
+    except AuthError as exc:
+        await message.answer(str(exc), reply_markup=keyboard())
+        await state.clear()
+        return
+    await state.set_state(Form.code)
+    await message.answer(info)
+
+
+@router.message(Form.code)
+async def got_code(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    _db, _bridge, auth, _poster = _ctx(message)
+    try:
+        info = await auth.sign_in(message.text or "")
+    except AuthError as exc:
+        await message.answer(str(exc), reply_markup=keyboard())
+        return
+    if "2FA" in info:
+        await state.set_state(Form.password)
+        await message.answer(info)
+        return
+    await state.clear()
+    await message.answer(info, reply_markup=keyboard())
+
+
+@router.message(Form.password)
+async def got_password(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    _db, _bridge, auth, _poster = _ctx(message)
+    try:
+        info = await auth.check_password(message.text or "")
+    except AuthError as exc:
+        await message.answer(str(exc))
+        return
+    await state.clear()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer(info, reply_markup=keyboard())
+
+
+@router.message(F.text == "📥 Источник")
+async def ask_source(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.source)
+    await message.answer("источник: @channel, id, t.me/c/… или «избранное»")
+
+
+@router.message(Form.source)
+async def set_source(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    try:
+        chat = normalize_chat(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    win = await db.current_window()
+    await db.update_window(win.id, source=chat)
+    await state.clear()
+    await message.answer(f"источник: {format_chat(chat)}", reply_markup=keyboard())
+
+
+@router.message(F.text == "📤 Назначение")
+async def ask_dest(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.dest)
+    await message.answer("назначение: @channel, id, t.me/c/… или «избранное»")
+
+
+@router.message(Form.dest)
+async def set_dest(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    try:
+        chat = normalize_chat(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    win = await db.current_window()
+    await db.update_window(win.id, dest=chat)
+    await state.clear()
+    await message.answer(f"назначение: {format_chat(chat)}", reply_markup=keyboard())
+
+
+@router.message(F.text == "⭐ Избранное")
+async def saved(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    win = await db.current_window()
+    if not win.dest:
+        await db.update_window(win.id, dest="me")
+        await message.answer("назначение: ⭐ Избранное", reply_markup=keyboard())
+        return
+    await db.update_window(win.id, dest="me")
+    await message.answer("назначение: ⭐ Избранное", reply_markup=keyboard())
+
+
+@router.message(F.text == "🔗 Старт-ссылка")
+async def ask_link(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.start_link)
+    await message.answer("ссылка на пост, со следующего начнём: t.me/channel/123")
+
+
+@router.message(Form.start_link)
+async def set_link(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    try:
+        point = parse_start_link(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    win = await db.current_window()
+    fields = {"last_msg_id": point.message_id}
+    if point.chat and not win.source:
+        fields["source"] = point.chat
+    await db.update_window(win.id, **fields)
+    await state.clear()
+    await message.answer(
+        f"старт после сообщения {point.message_id} в {format_chat(point.chat or win.source)}",
+        reply_markup=keyboard(),
+    )
+
+
+@router.message(F.text == "📜 С начала")
+async def from_start(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, _bridge, _auth, poster = _ctx(message)
+    win = await db.current_window()
+    if not win.source:
+        await message.answer("сначала укажите источник")
+        return
+    await message.answer("сканирую историю источника…")
+    try:
+        scanned = await poster.rewind_to_start(win)
+    except Exception as exc:
+        await message.answer(f"не вышло: {exc}")
+        return
+    await message.answer(f"история сброшена, в очереди ≈{scanned} постов", reply_markup=keyboard())
+
+
+@router.message(F.text == "✏️ Описание")
+async def ask_caption(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.caption)
+    await message.answer("шаблон подписи (HTML сохранится). «-» чтобы очистить")
+
+
+@router.message(Form.caption)
+async def set_caption(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    text = "-" if (message.text or "").strip() == "-" else message_to_html(message)
+    if text == "-":
+        text = ""
+    win = await db.current_window()
+    await db.update_window(win.id, caption=text)
+    await state.clear()
+    await message.answer("описание сохранено" if text else "описание снято", reply_markup=keyboard())
+
+
+@router.message(F.text == "⏱ Интервал")
+async def ask_interval(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.interval)
+    await message.answer("интервал: 30м, 2ч, 1д или секунды")
+
+
+@router.message(Form.interval)
+async def set_interval(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    try:
+        seconds = parse_duration(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    win = await db.current_window()
+    await db.update_window(win.id, interval_seconds=seconds)
+    await state.clear()
+    await message.answer(f"интервал: {format_duration(seconds)}", reply_markup=keyboard())
+
+
+@router.message(F.text == "📦 Лимит")
+async def ask_limit(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    await state.set_state(Form.limit)
+    await message.answer("сколько постов за один цикл (1–50)")
+
+
+@router.message(Form.limit)
+async def set_limit(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    try:
+        value = int((message.text or "").strip())
+        if not 1 <= value <= 50:
+            raise ValueError
+    except ValueError:
+        await message.answer("нужно число от 1 до 50")
+        return
+    win = await db.current_window()
+    await db.update_window(win.id, posts_per_cycle=value)
+    await state.clear()
+    await message.answer(f"лимит: {value}", reply_markup=keyboard())
+
+
+@router.message(Command("filter"))
+@router.message(F.text == "🧹 Чистый перелив")
+async def toggle_filter(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    win = await db.current_window()
+    await db.update_window(win.id, clean_filter=not win.clean_filter)
+    win = await db.get_window(win.id)
+    assert win
+    await message.answer(
+        "чистый перелив: только фото/видео, без подписи" if win.clean_filter else "фильтр выключен — уходят все посты",
+        reply_markup=keyboard(),
+    )
+
+
+@router.message(F.text == "▶️ Старт")
+async def start_one(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, *_ = _ctx(message)
+    if not bridge.logged_in():
+        await message.answer("сначала 🔐 Вход юзербота")
+        return
+    win = await db.current_window()
+    if not win.source or not win.dest:
+        await message.answer("нужны источник и назначение")
+        return
+    await db.update_window(win.id, enabled=True, paused=False, next_run_at=time.time())
+    bridge.stop_cycle.clear()
+    await message.answer(f"окно #{win.id} запущено. первый цикл в ближайшие секунды.", reply_markup=keyboard())
+
+
+@router.message(F.text == "⏸ Пауза")
+async def pause(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    await db.global_pause(True)
+    await message.answer("пауза: текущий цикл доработает, новые не стартуют", reply_markup=keyboard())
+
+
+@router.message(F.text == "⏹ Стоп")
+async def stop(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, *_ = _ctx(message)
+    bridge.stop_cycle.set()
+    await db.global_pause(True, stop_enabled=True)
+    await message.answer("стоп: цикл оборван, автопост выключен", reply_markup=keyboard())
+
+
+@router.message(F.text == "🪟 Окна")
+async def list_windows(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    windows = await db.list_windows()
+    lines = ["выберите окно номером, например 1"]
+    for win in windows:
+        flag = "▶" if win.enabled and not win.paused else "⏸"
+        lines.append(f"{flag} {win.id}. {format_chat(win.source)} → {format_chat(win.dest)}")
+    await message.answer("\n".join(lines), reply_markup=keyboard())
+
+
+@router.message(F.text.regexp(r"^\d{1,2}$"))
+async def select_window(message: Message, state: FSMContext) -> None:
+    if await state.get_state() is not None:
+        return
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    win = await db.get_window(int(message.text or "0"))
+    if not win:
+        return
+    await db.set_current_window(win.id)
+    await message.answer(
+        f"текущее окно #{win.id}: {format_chat(win.source)} → {format_chat(win.dest)}",
+        reply_markup=keyboard(),
+    )
+
+
+@router.message(F.text == "➕ Добавить")
+async def add_window(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    try:
+        win = await db.add_window()
+    except RuntimeError as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(f"добавлено окно #{win.id}", reply_markup=keyboard())
+
+
+@router.message(F.text == "📋 Клон")
+async def clone_window(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    current = await db.current_window()
+    try:
+        win = await db.add_window(clone=current)
+    except RuntimeError as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(f"клон #{win.id} источника {format_chat(current.source)}", reply_markup=keyboard())
+
+
+@router.message(F.text == "▶️ Старт все")
+async def start_all(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, *_ = _ctx(message)
+    if not bridge.logged_in():
+        await message.answer("сначала 🔐 Вход юзербота")
+        return
+    await db.start_all()
+    bridge.stop_cycle.clear()
+    await message.answer("все заполненные окна запущены", reply_markup=keyboard())
+
+
+def build_dispatcher() -> Dispatcher:
+    dp = Dispatcher()
+    dp.include_router(router)
+    return dp
+
+
+async def start_polling(bot: Bot, dp: Dispatcher) -> None:
+    await bot.delete_webhook(drop_pending_updates=False)
+    await dp.start_polling(bot, allowed_updates=["message"])

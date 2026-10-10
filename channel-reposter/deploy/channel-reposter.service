@@ -1,0 +1,21 @@
+[Unit]
+Description=Channel Reposter Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=channel-reposter
+Group=channel-reposter
+WorkingDirectory=/opt/channel-reposter/app
+EnvironmentFile=-/opt/channel-reposter/app/.env
+ExecStart=/opt/channel-reposter/app/.venv/bin/python /opt/channel-reposter/app/main.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
