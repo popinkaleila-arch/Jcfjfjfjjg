@@ -8,8 +8,10 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified, RPCError
 
 import config
+from bot_editor import BotEditor
 from bridge import UserbotBridge
 from database import Database, Window
+from formatting import compose_dest_caption
 from transfer_filters import album_is_clean, should_skip
 
 CAPTION_LIMIT = 1024
@@ -18,9 +20,10 @@ log = logging.getLogger("poster")
 
 
 class Poster:
-    def __init__(self, db: Database, bridge: UserbotBridge) -> None:
+    def __init__(self, db: Database, bridge: UserbotBridge, editor: BotEditor | None = None) -> None:
         self.db = db
         self.bridge = bridge
+        self.editor = editor
 
     async def run_window(self, window: Window) -> int:
         if self.bridge.stop_cycle.is_set():
@@ -145,7 +148,8 @@ class Poster:
             log.exception("copy failed id=%s", message.id)
             return False
         dest_id = getattr(copied, "id", None) if copied is not None else None
-        await self._remember(window, dest_id, message.id, kwargs.get("caption") or "", is_album=False)
+        final_caption = await self._apply_bot_caption(window, dest_id, message)
+        await self._remember(window, dest_id, message.id, final_caption or kwargs.get("caption") or "", is_album=False)
         return True
 
     async def _copy_album(self, window: Window, album: list) -> bool:
@@ -177,15 +181,39 @@ class Poster:
         first = copied[0] if copied else None
         dest_id = getattr(first, "id", None)
         caption = "" if window.clean_filter else (window.caption or "")
-        await self._remember(window, dest_id, album[0].id, caption, is_album=True)
+        final_caption = await self._apply_bot_caption(window, dest_id, album[0])
+        await self._remember(window, dest_id, album[0].id, final_caption or caption, is_album=True)
         return True
 
-    async def edit_caption(self, chat: str, message_id: int, caption: str) -> str:
-        if not self.bridge.logged_in() or self.bridge.client is None:
-            raise RuntimeError("сначала войдите в юзербота")
+    async def _apply_bot_caption(self, window: Window, dest_id: int | None, source) -> str:
+        html = compose_dest_caption(window.caption, source)
+        if not window.bot_edit or not dest_id or not window.dest or not html:
+            return html
+        if not self.editor:
+            log.warning("bot editor не подключён — подпись не проставлена")
+            return html
+        try:
+            await self.editor.edit_caption(window.dest, int(dest_id), html)
+            return html
+        except Exception as exc:
+            log.warning("бот не смог проставить подпись: %s", exc)
+            return html
+
+    async def edit_caption(self, chat: str, message_id: int, caption: str, prefer_bot: bool = True) -> str:
         text = caption or ""
         if len(text) > CAPTION_LIMIT:
             raise RuntimeError(f"подпись длиннее {CAPTION_LIMIT} символов")
+        errors: list[str] = []
+        if prefer_bot and self.editor:
+            try:
+                result = await self.editor.edit_caption(chat, message_id, text)
+                await self.db.update_post_caption(chat, message_id, text)
+                return result
+            except Exception as exc:
+                errors.append(str(exc))
+                log.warning("правка ботом не вышла, пробую юзербота: %s", exc)
+        if not self.bridge.logged_in() or self.bridge.client is None:
+            raise RuntimeError(errors[0] if errors else "сначала войдите в юзербота или выдайте боту админку")
         client = self.bridge.client
         parse = ParseMode.HTML if text else ParseMode.DISABLED
 
@@ -210,7 +238,7 @@ class Poster:
         except MessageNotModified:
             return "текст тот же — Telegram ничего не менял"
         except MessageIdInvalid as exc:
-            raise RuntimeError("пост не найден или его уже нельзя править") from exc
+            raise RuntimeError(errors[0] if errors else "пост не найден или его уже нельзя править") from exc
         except RPCError as caption_error:
             try:
                 if not text:
@@ -225,6 +253,7 @@ class Poster:
             except MessageNotModified:
                 return "текст тот же — Telegram ничего не менял"
             except RPCError as text_error:
-                raise RuntimeError(f"не удалось править пост: {text_error}") from text_error
+                detail = errors[0] if errors else str(text_error)
+                raise RuntimeError(f"не удалось править пост: {detail}") from text_error
         await self.db.update_post_caption(chat, message_id, text)
-        return "описание обновлено"
+        return "описание обновлено юзерботом"

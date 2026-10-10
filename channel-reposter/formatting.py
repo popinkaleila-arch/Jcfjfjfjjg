@@ -9,6 +9,25 @@ def message_to_html(message: Message) -> str:
     return message.text or message.caption or ""
 
 
+def rich_text_html(value: object | None) -> str:
+    if value is None:
+        return ""
+    html = getattr(value, "html", None)
+    if isinstance(html, str) and html:
+        return html
+    markdown = getattr(value, "markdown", None)
+    if isinstance(markdown, str) and markdown and not isinstance(value, str):
+        return markdown
+    return str(value) if value else ""
+
+
+def pyrogram_to_html(message: object) -> str:
+    caption = rich_text_html(getattr(message, "caption", None))
+    if caption:
+        return caption
+    return rich_text_html(getattr(message, "text", None))
+
+
 def apply_caption_template(template: str, original: str) -> str:
     text = (template or "").strip()
     if not text:
@@ -18,3 +37,8 @@ def apply_caption_template(template: str, original: str) -> str:
     if original:
         return f"{text}\n\n{original}"
     return text
+
+
+def compose_dest_caption(template: str, source_message: object | None) -> str:
+    original = pyrogram_to_html(source_message) if source_message is not None else ""
+    return apply_caption_template(template, original)

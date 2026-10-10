@@ -10,6 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from access import is_admin
+from bot_editor import BotEditor
 from bridge import UserbotBridge
 from database import Database
 from formatting import message_to_html
@@ -54,7 +55,7 @@ def keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📥 Источник"), KeyboardButton(text="📤 Назначение"), KeyboardButton(text="⭐ Избранное")],
             [KeyboardButton(text="🔗 Старт-ссылка"), KeyboardButton(text="📜 С начала"), KeyboardButton(text="✏️ Описание")],
             [KeyboardButton(text="🖊 Правка поста"), KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит")],
-            [KeyboardButton(text="🧹 Чистый перелив")],
+            [KeyboardButton(text="🧹 Чистый перелив"), KeyboardButton(text="🤖 Бот правит подписи")],
             [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="⏹ Стоп")],
             [KeyboardButton(text="🪟 Окна"), KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📋 Клон"), KeyboardButton(text="▶️ Старт все")],
         ],
@@ -62,9 +63,9 @@ def keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _ctx(message: Message) -> tuple[Database, UserbotBridge, UserbotAuth, Poster]:
+def _ctx(message: Message) -> tuple[Database, UserbotBridge, UserbotAuth, Poster, BotEditor | None]:
     data = message.bot.workflow  # type: ignore[attr-defined]
-    return data["db"], data["bridge"], data["auth"], data["poster"]
+    return data["db"], data["bridge"], data["auth"], data["poster"], data.get("editor")
 
 
 async def _guard(message: Message) -> bool:
@@ -75,7 +76,7 @@ async def _guard(message: Message) -> bool:
     return True
 
 
-async def status_text(db: Database, bridge: UserbotBridge) -> str:
+async def status_text(db: Database, bridge: UserbotBridge, editor: BotEditor | None = None) -> str:
     windows = await db.list_windows()
     current = await db.current_window()
     running = any_running(windows)
@@ -94,10 +95,14 @@ async def status_text(db: Database, bridge: UserbotBridge) -> str:
         f"интервал: {format_duration(current.interval_seconds)}",
         f"лимит: {current.posts_per_cycle}",
         f"фильтр: {'чистый' if current.clean_filter else 'все посты'}",
+        f"бот правит подписи: {'вкл' if current.bot_edit else 'выкл'}",
         f"очередь≈{queued}  всего={posted}",
         f"источник: {format_chat(current.source)}",
         f"назначение: {format_chat(current.dest)}",
     ]
+    if current.bot_edit and current.dest and editor:
+        rights = await editor.check_rights(current.dest)
+        lines.append(f"права бота: {'ок' if rights.ok else 'нет'} — {rights.detail}")
     if windows:
         lines.append("")
         lines.append("окна:")
@@ -118,12 +123,15 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
     await state.clear()
-    db, bridge, *_ = _ctx(message)
+    db, bridge, *_rest = _ctx(message)
+    editor = _rest[-1] if _rest else None
     await message.answer(
         "Channel Reposter — панель управления.\n\n"
         "1) 🔐 Вход юзербота (api_id, api_hash, телефон, код)\n"
         "2) 📥 Источник и 📤 Назначение\n"
-        "3) ▶️ Старт\n\n" + await status_text(db, bridge),
+        "3) выдайте @ZzzLV_bot админку назначения с правом менять сообщения\n"
+        "4) ▶️ Старт — бот сам проставит описание с форматированием\n\n"
+        + await status_text(db, bridge, editor),
         reply_markup=keyboard(),
     )
 
@@ -133,8 +141,9 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 async def cmd_status(message: Message) -> None:
     if not await _guard(message):
         return
-    db, bridge, *_ = _ctx(message)
-    await message.answer(await status_text(db, bridge), reply_markup=keyboard())
+    db, bridge, *_rest = _ctx(message)
+    editor = _rest[-1] if _rest else None
+    await message.answer(await status_text(db, bridge, editor), reply_markup=keyboard())
 
 
 @router.message(F.text == "🔐 Вход юзербота")
@@ -169,7 +178,7 @@ async def got_api_id(message: Message, state: FSMContext) -> None:
 async def got_api_hash(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    db, _bridge, auth, _poster = _ctx(message)
+    db, _bridge, auth, _poster, _editor = _ctx(message)
     data = await state.get_data()
     try:
         await auth.save_api(data.get("api_id", ""), (message.text or "").strip())
@@ -184,7 +193,7 @@ async def got_api_hash(message: Message, state: FSMContext) -> None:
 async def got_phone(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    _db, _bridge, auth, _poster = _ctx(message)
+    _db, _bridge, auth, _poster, _editor = _ctx(message)
     try:
         info = await auth.send_code(message.text or "")
     except AuthError as exc:
@@ -199,7 +208,7 @@ async def got_phone(message: Message, state: FSMContext) -> None:
 async def got_code(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    _db, _bridge, auth, _poster = _ctx(message)
+    _db, _bridge, auth, _poster, _editor = _ctx(message)
     try:
         info = await auth.sign_in(message.text or "")
     except AuthError as exc:
@@ -217,7 +226,7 @@ async def got_code(message: Message, state: FSMContext) -> None:
 async def got_password(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    _db, _bridge, auth, _poster = _ctx(message)
+    _db, _bridge, auth, _poster, _editor = _ctx(message)
     try:
         info = await auth.check_password(message.text or "")
     except AuthError as exc:
@@ -327,7 +336,7 @@ async def set_link(message: Message, state: FSMContext) -> None:
 async def from_start(message: Message) -> None:
     if not await _guard(message):
         return
-    db, _bridge, _auth, poster = _ctx(message)
+    db, _bridge, _auth, poster, _editor = _ctx(message)
     win = await db.current_window()
     if not win.source:
         await message.answer("сначала укажите источник")
@@ -441,7 +450,8 @@ async def pick_edit_post(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"пост {format_post_link(dest, dest_msg_id)}\n"
         f"сейчас: {current}\n\n"
-        "пришлите новое описание. «-» снимет подпись."
+        "пришлите новое описание — жирный, ссылки и остальное форматирование Telegram сохранится.\n"
+        "«-» снимет подпись. Сначала правит бот-админ, если не выйдет — юзербот."
     )
 
 
@@ -449,7 +459,7 @@ async def pick_edit_post(message: Message, state: FSMContext) -> None:
 async def apply_edit_post(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
-    _db, _bridge, _auth, poster = _ctx(message)
+    _db, _bridge, _auth, poster, _editor = _ctx(message)
     data = await state.get_data()
     dest = data.get("edit_dest")
     dest_msg_id = data.get("edit_msg_id")
@@ -534,11 +544,36 @@ async def toggle_filter(message: Message) -> None:
     )
 
 
+@router.message(Command("botedit"))
+@router.message(F.text == "🤖 Бот правит подписи")
+async def toggle_bot_edit(message: Message) -> None:
+    if not await _guard(message):
+        return
+    db, _bridge, _auth, _poster, editor = _ctx(message)
+    win = await db.current_window()
+    await db.update_window(win.id, bot_edit=not win.bot_edit)
+    win = await db.get_window(win.id)
+    assert win
+    if not win.bot_edit:
+        await message.answer("бот больше не трогает подписи после залива", reply_markup=keyboard())
+        return
+    extra = ""
+    if win.dest and editor:
+        rights = await editor.check_rights(win.dest)
+        extra = "\n" + ("права ок: " + rights.detail if rights.ok else "⚠ " + rights.detail)
+    await message.answer(
+        "бот сам проставит описание после залива, со всем HTML-форматированием."
+        "\nвыдайте @ZzzLV_bot админку назначения с правом «Изменение сообщений»."
+        + extra,
+        reply_markup=keyboard(),
+    )
+
+
 @router.message(F.text == "▶️ Старт")
 async def start_one(message: Message) -> None:
     if not await _guard(message):
         return
-    db, bridge, *_ = _ctx(message)
+    db, bridge, _auth, _poster, editor = _ctx(message)
     if not bridge.logged_in():
         await message.answer("сначала 🔐 Вход юзербота")
         return
@@ -546,9 +581,17 @@ async def start_one(message: Message) -> None:
     if not win.source or not win.dest:
         await message.answer("нужны источник и назначение")
         return
+    warn = ""
+    if win.bot_edit and editor:
+        rights = await editor.check_rights(win.dest)
+        if not rights.ok:
+            warn = f"\n⚠ бот не сможет править подписи: {rights.detail}"
     await db.update_window(win.id, enabled=True, paused=False, next_run_at=time.time())
     bridge.stop_cycle.clear()
-    await message.answer(f"окно #{win.id} запущено. первый цикл в ближайшие секунды.", reply_markup=keyboard())
+    await message.answer(
+        f"окно #{win.id} запущено. первый цикл в ближайшие секунды.{warn}",
+        reply_markup=keyboard(),
+    )
 
 
 @router.message(F.text == "⏸ Пауза")

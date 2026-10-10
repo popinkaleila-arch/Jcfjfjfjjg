@@ -18,6 +18,7 @@ def _win(**kwargs) -> Window:
         next_run_at=0,
         queued=0,
         posted_total=0,
+        bot_edit=True,
     )
     data.update(kwargs)
     return Window(**data)

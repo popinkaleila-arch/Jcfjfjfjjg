@@ -10,6 +10,7 @@ from aiogram import Bot
 
 import config
 from admin_bot import build_dispatcher, start_polling
+from bot_editor import BotEditor
 from bridge import UserbotBridge
 from database import Database
 from poster import Poster
@@ -108,14 +109,16 @@ async def amain() -> None:
     await db.connect()
     bridge = UserbotBridge(db)
     auth = UserbotAuth(db, bridge)
-    poster = Poster(db, bridge)
     bot = Bot(config.BOT_TOKEN)
+    editor = BotEditor(bot)
+    poster = Poster(db, bridge, editor)
     dp = build_dispatcher()
     bot.workflow = {  # type: ignore[attr-defined]
         "db": db,
         "bridge": bridge,
         "auth": auth,
         "poster": poster,
+        "editor": editor,
     }
     await bridge.attach()
     me = await bot.get_me()

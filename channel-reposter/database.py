@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS windows (
     caption TEXT NOT NULL DEFAULT '',
     next_run_at REAL NOT NULL DEFAULT 0,
     queued INTEGER NOT NULL DEFAULT 0,
-    posted_total INTEGER NOT NULL DEFAULT 0
+    posted_total INTEGER NOT NULL DEFAULT 0,
+    bot_edit INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +61,7 @@ class Window:
     next_run_at: float
     queued: int
     posted_total: int
+    bot_edit: bool
 
 
 @dataclass
@@ -103,8 +105,16 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._db.commit()
+        await self._migrate()
         if not await self.list_windows():
             await self.add_window()
+
+    async def _migrate(self) -> None:
+        cur = await self.db.execute("PRAGMA table_info(windows)")
+        columns = {row[1] for row in await cur.fetchall()}
+        if "bot_edit" not in columns:
+            await self.db.execute("ALTER TABLE windows ADD COLUMN bot_edit INTEGER NOT NULL DEFAULT 1")
+            await self.db.commit()
 
     async def close(self) -> None:
         if self._db:
@@ -185,6 +195,7 @@ class Database:
             next_run_at=row["next_run_at"] or 0,
             queued=row["queued"] or 0,
             posted_total=row["posted_total"] or 0,
+            bot_edit=bool(row["bot_edit"]) if "bot_edit" in row.keys() else True,
         )
 
     async def list_windows(self) -> list[Window]:
@@ -225,10 +236,10 @@ class Database:
             clean, caption = 1, ""
         cur = await self.db.execute(
             """
-            INSERT INTO windows(title, source, dest, interval_seconds, posts_per_cycle, clean_filter, caption, paused)
-            VALUES(?, ?, ?, ?, ?, ?, ?, 1)
+            INSERT INTO windows(title, source, dest, interval_seconds, posts_per_cycle, clean_filter, caption, paused, bot_edit)
+            VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?)
             """,
-            ("", source, dest, interval, limit, clean, caption),
+            ("", source, dest, interval, limit, clean, caption, int(clone.bot_edit) if clone else 1),
         )
         await self.db.commit()
         win = await self.get_window(cur.lastrowid)
@@ -255,13 +266,14 @@ class Database:
             "next_run_at": "next_run_at",
             "queued": "queued",
             "posted_total": "posted_total",
+            "bot_edit": "bot_edit",
         }
         sets = []
         values: list[Any] = []
         for key, column in mapping.items():
             if key in fields:
                 value = fields[key]
-                if key in {"enabled", "paused", "clean_filter"}:
+                if key in {"enabled", "paused", "clean_filter", "bot_edit"}:
                     value = 1 if value else 0
                 sets.append(f"{column} = ?")
                 values.append(value)
