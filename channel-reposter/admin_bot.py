@@ -13,7 +13,16 @@ from access import is_admin
 from bridge import UserbotBridge
 from database import Database
 from formatting import message_to_html
-from links import format_chat, format_duration, normalize_chat, parse_duration, parse_start_link
+from links import (
+    format_chat,
+    format_duration,
+    format_post_link,
+    forwarded_point,
+    normalize_chat,
+    parse_duration,
+    parse_start_link,
+    preview_caption,
+)
 from poster import Poster
 from scheduling import any_running
 from userbot_auth import AuthError, UserbotAuth
@@ -34,6 +43,8 @@ class Form(StatesGroup):
     interval = State()
     limit = State()
     start_link = State()
+    edit_pick = State()
+    edit_text = State()
 
 
 def keyboard() -> ReplyKeyboardMarkup:
@@ -42,7 +53,8 @@ def keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔐 Вход юзербота"), KeyboardButton(text="📊 Статус")],
             [KeyboardButton(text="📥 Источник"), KeyboardButton(text="📤 Назначение"), KeyboardButton(text="⭐ Избранное")],
             [KeyboardButton(text="🔗 Старт-ссылка"), KeyboardButton(text="📜 С начала"), KeyboardButton(text="✏️ Описание")],
-            [KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит"), KeyboardButton(text="🧹 Чистый перелив")],
+            [KeyboardButton(text="🖊 Правка поста"), KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит")],
+            [KeyboardButton(text="🧹 Чистый перелив")],
             [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="⏹ Стоп")],
             [KeyboardButton(text="🪟 Окна"), KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📋 Клон"), KeyboardButton(text="▶️ Старт все")],
         ],
@@ -349,6 +361,111 @@ async def set_caption(message: Message, state: FSMContext) -> None:
     await db.update_window(win.id, caption=text)
     await state.clear()
     await message.answer("описание сохранено" if text else "описание снято", reply_markup=keyboard())
+
+
+def _recent_lines(posts) -> str:
+    if not posts:
+        return "в журнале ещё нет залитых постов — можно прислать ссылку или переслать пост из назначения"
+    lines = []
+    for index, post in enumerate(posts, start=1):
+        lines.append(
+            f"{index}. {format_post_link(post.dest, post.dest_msg_id)} — {preview_caption(post.caption)}"
+        )
+    return "\n".join(lines)
+
+
+@router.message(Command("edit"))
+@router.message(F.text == "🖊 Правка поста")
+async def ask_edit_post(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, bridge, *_ = _ctx(message)
+    if not bridge.logged_in():
+        await message.answer("сначала 🔐 Вход юзербота")
+        return
+    win = await db.current_window()
+    posts = await db.list_recent_posts(win.id, limit=8)
+    await state.set_state(Form.edit_pick)
+    await state.update_data(recent_ids=[post.id for post in posts])
+    await message.answer(
+        "правлю описание уже залитого поста.\n\n"
+        "пришлите ссылку t.me/…/123, перешлите пост из назначения, "
+        "напишите «последний» или номер из списка.\n"
+        "/cancel — отмена.\n\n" + _recent_lines(posts)
+    )
+
+
+@router.message(Form.edit_pick)
+async def pick_edit_post(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    db, *_ = _ctx(message)
+    point = forwarded_point(message)
+    text = (message.text or message.caption or "").strip()
+    dest = None
+    dest_msg_id = None
+    if point:
+        dest, dest_msg_id = point.chat, point.message_id
+    elif text.lower() in {"последний", "last", "последнее"}:
+        win = await db.current_window()
+        posts = await db.list_recent_posts(win.id, limit=1)
+        if not posts:
+            await message.answer("для этого окна ещё нет залитых постов")
+            return
+        dest, dest_msg_id = posts[0].dest, posts[0].dest_msg_id
+    elif text.isdigit():
+        data = await state.get_data()
+        recent_ids = data.get("recent_ids") or []
+        index = int(text)
+        if 1 <= index <= len(recent_ids):
+            post = await db.get_post(int(recent_ids[index - 1]))
+            if post:
+                dest, dest_msg_id = post.dest, post.dest_msg_id
+        if dest is None:
+            await message.answer("нет такого номера в списке")
+            return
+    elif text:
+        try:
+            parsed = parse_start_link(text)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        dest, dest_msg_id = parsed.chat, parsed.message_id
+    else:
+        await message.answer("нужна ссылка, пересланный пост, «последний» или номер")
+        return
+    known = await db.find_post(dest, dest_msg_id)
+    current = preview_caption(known.caption, 200) if known else "не знаю текущую подпись"
+    await state.set_state(Form.edit_text)
+    await state.update_data(edit_dest=dest, edit_msg_id=dest_msg_id)
+    await message.answer(
+        f"пост {format_post_link(dest, dest_msg_id)}\n"
+        f"сейчас: {current}\n\n"
+        "пришлите новое описание. «-» снимет подпись."
+    )
+
+
+@router.message(Form.edit_text)
+async def apply_edit_post(message: Message, state: FSMContext) -> None:
+    if not await _guard(message):
+        return
+    _db, _bridge, _auth, poster = _ctx(message)
+    data = await state.get_data()
+    dest = data.get("edit_dest")
+    dest_msg_id = data.get("edit_msg_id")
+    if not dest or not dest_msg_id:
+        await state.clear()
+        await message.answer("цель потерялась, нажмите 🖊 Правка поста ещё раз", reply_markup=keyboard())
+        return
+    raw = (message.text or "").strip()
+    caption = "" if raw == "-" else message_to_html(message)
+    try:
+        result = await poster.edit_caption(str(dest), int(dest_msg_id), caption)
+    except Exception as exc:
+        await message.answer(f"{exc}")
+        return
+    await state.clear()
+    await message.answer(f"{result}\n{format_post_link(str(dest), int(dest_msg_id))}", reply_markup=keyboard())
 
 
 @router.message(F.text == "⏱ Интервал")

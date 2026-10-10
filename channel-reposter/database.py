@@ -29,6 +29,18 @@ CREATE TABLE IF NOT EXISTS windows (
     queued INTEGER NOT NULL DEFAULT 0,
     posted_total INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id INTEGER NOT NULL,
+    dest TEXT NOT NULL,
+    dest_msg_id INTEGER NOT NULL,
+    source TEXT,
+    source_msg_id INTEGER,
+    is_album INTEGER NOT NULL DEFAULT 0,
+    caption TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    UNIQUE(dest, dest_msg_id)
+);
 """
 
 
@@ -48,6 +60,19 @@ class Window:
     next_run_at: float
     queued: int
     posted_total: int
+
+
+@dataclass
+class PublishedPost:
+    id: int
+    window_id: int
+    dest: str
+    dest_msg_id: int
+    source: str | None
+    source_msg_id: int | None
+    is_album: bool
+    caption: str
+    created_at: float
 
 
 @dataclass
@@ -269,5 +294,86 @@ class Database:
         await self.db.execute(
             "UPDATE windows SET paused = 0, enabled = 1, next_run_at = ? WHERE source IS NOT NULL AND dest IS NOT NULL",
             (now,),
+        )
+        await self.db.commit()
+
+    def _row_to_post(self, row: aiosqlite.Row) -> PublishedPost:
+        return PublishedPost(
+            id=row["id"],
+            window_id=row["window_id"],
+            dest=row["dest"],
+            dest_msg_id=row["dest_msg_id"],
+            source=row["source"],
+            source_msg_id=row["source_msg_id"],
+            is_album=bool(row["is_album"]),
+            caption=row["caption"] or "",
+            created_at=row["created_at"] or 0,
+        )
+
+    async def record_post(
+        self,
+        window_id: int,
+        dest: str,
+        dest_msg_id: int,
+        source: str | None = None,
+        source_msg_id: int | None = None,
+        is_album: bool = False,
+        caption: str = "",
+    ) -> PublishedPost:
+        now = time.time()
+        await self.db.execute(
+            """
+            INSERT INTO posts(window_id, dest, dest_msg_id, source, source_msg_id, is_album, caption, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dest, dest_msg_id) DO UPDATE SET
+                window_id = excluded.window_id,
+                source = excluded.source,
+                source_msg_id = excluded.source_msg_id,
+                is_album = excluded.is_album,
+                caption = excluded.caption,
+                created_at = excluded.created_at
+            """,
+            (window_id, dest, dest_msg_id, source, source_msg_id, 1 if is_album else 0, caption or "", now),
+        )
+        await self.db.commit()
+        cur = await self.db.execute(
+            "SELECT * FROM posts WHERE dest = ? AND dest_msg_id = ?",
+            (dest, dest_msg_id),
+        )
+        row = await cur.fetchone()
+        assert row
+        return self._row_to_post(row)
+
+    async def list_recent_posts(self, window_id: int | None = None, limit: int = 10) -> list[PublishedPost]:
+        if window_id is None:
+            cur = await self.db.execute(
+                "SELECT * FROM posts ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        else:
+            cur = await self.db.execute(
+                "SELECT * FROM posts WHERE window_id = ? ORDER BY id DESC LIMIT ?",
+                (window_id, limit),
+            )
+        rows = await cur.fetchall()
+        return [self._row_to_post(row) for row in rows]
+
+    async def get_post(self, post_id: int) -> PublishedPost | None:
+        cur = await self.db.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
+        row = await cur.fetchone()
+        return self._row_to_post(row) if row else None
+
+    async def find_post(self, dest: str, dest_msg_id: int) -> PublishedPost | None:
+        cur = await self.db.execute(
+            "SELECT * FROM posts WHERE dest = ? AND dest_msg_id = ?",
+            (dest, dest_msg_id),
+        )
+        row = await cur.fetchone()
+        return self._row_to_post(row) if row else None
+
+    async def update_post_caption(self, dest: str, dest_msg_id: int, caption: str) -> None:
+        await self.db.execute(
+            "UPDATE posts SET caption = ? WHERE dest = ? AND dest_msg_id = ?",
+            (caption, dest, dest_msg_id),
         )
         await self.db.commit()

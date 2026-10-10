@@ -113,3 +113,45 @@ def format_chat(chat: str | None) -> str:
     if chat == "me":
         return "⭐ Избранное"
     return chat
+
+
+def format_post_link(chat: str, message_id: int) -> str:
+    if chat == "me":
+        return f"Saved Messages / {message_id}"
+    if chat.startswith("-100") and chat[4:].isdigit():
+        return f"https://t.me/c/{chat[4:]}/{message_id}"
+    if chat.startswith("@"):
+        return f"https://t.me/{chat[1:]}/{message_id}"
+    return f"{chat}/{message_id}"
+
+
+def forwarded_point(message: object) -> StartPoint | None:
+    origin = getattr(message, "forward_origin", None)
+    chat = getattr(origin, "chat", None)
+    mid = getattr(origin, "message_id", None)
+    if chat is not None and mid:
+        username = getattr(chat, "username", None)
+        chat_id = getattr(chat, "id", None)
+        if username:
+            return StartPoint(f"@{username}", int(mid))
+        if chat_id is not None:
+            return StartPoint(str(chat_id), int(mid))
+    chat = getattr(message, "forward_from_chat", None)
+    mid = getattr(message, "forward_from_message_id", None)
+    if chat is not None and mid:
+        username = getattr(chat, "username", None)
+        chat_id = getattr(chat, "id", None)
+        if username:
+            return StartPoint(f"@{username}", int(mid))
+        if chat_id is not None:
+            return StartPoint(str(chat_id), int(mid))
+    return None
+
+
+def preview_caption(text: str, limit: int = 60) -> str:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return "без подписи"
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + "…"
