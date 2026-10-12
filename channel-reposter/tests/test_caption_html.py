@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from bot_editor import _strip_html
+from bot_editor import _strip_html, caption_key
 from formatting import apply_caption_template, compose_dest_caption, pyrogram_to_html
 
 
@@ -29,3 +29,9 @@ def test_compose_template_only() -> None:
 
 def test_strip_html_keeps_plain_text() -> None:
     assert _strip_html('<b>VPN</b> <a href="https://t.me/x">shop</a>') == "VPN shop"
+
+
+def test_caption_key_ignores_nested_tags() -> None:
+    nested = '<i>🌐 </i><a href="https://t.me/x"><i>VPN</i></a><i> click</i>'
+    stored = '🌐 <a href="https://t.me/x">VPN</a> click'
+    assert caption_key(nested) == caption_key(stored)

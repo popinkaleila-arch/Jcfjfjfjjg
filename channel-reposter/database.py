@@ -364,6 +364,14 @@ class Database:
         rows = await cur.fetchall()
         return [int(row[0]) for row in rows]
 
+    async def list_dest_captions(self, dest: str) -> list[tuple[int, str]]:
+        cur = await self.db.execute(
+            "SELECT dest_msg_id, caption FROM posts WHERE dest = ?",
+            (dest,),
+        )
+        rows = await cur.fetchall()
+        return [(int(row[0]), row[1] or "") for row in rows]
+
     async def list_recent_posts(self, window_id: int | None = None, limit: int = 10) -> list[PublishedPost]:
         if window_id is None:
             cur = await self.db.execute(

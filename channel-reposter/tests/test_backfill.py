@@ -26,12 +26,18 @@ def make_window() -> Window:
 
 
 class MemoryDb:
-    def __init__(self, ids=None) -> None:
+    def __init__(self, ids=None, captions=None) -> None:
         self.ids = list(ids or [])
+        self.captions = dict(captions or {})
         self.posts = []
 
     async def list_dest_message_ids(self, dest: str) -> list[int]:
         return list(self.ids)
+
+    async def list_dest_captions(self, dest: str) -> list[tuple[int, str]]:
+        if self.captions:
+            return list(self.captions.items())
+        return [(item, "") for item in self.ids]
 
     async def record_post(self, **kwargs) -> None:
         self.posts.append(kwargs)
@@ -134,3 +140,41 @@ async def _stop_backfill_halts_walk() -> None:
 def test_idle_stop_is_false() -> None:
     poster = Poster(MemoryDb(), SimpleNamespace(), FakeEditor())
     assert poster.request_stop_backfill() is False
+
+
+def test_skips_posts_that_already_have_caption() -> None:
+    asyncio.run(_skips_posts_that_already_have_caption())
+
+
+async def _skips_posts_that_already_have_caption() -> None:
+    existing = {2, 5, 10, 40}
+    editor = FakeEditor(existing=existing)
+    db = MemoryDb(captions={40: "<b>x</b>", 10: "<b>x</b>"})
+    poster = Poster(db, SimpleNamespace(), editor)
+    poster.backfill_delay = 0
+    result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
+    assert set(editor.edited) == {2, 5}
+    assert result.updated == 2
+    assert result.same >= 2
+
+
+def test_not_modified_counts_as_same() -> None:
+    asyncio.run(_not_modified_counts_as_same())
+
+
+class SameEditor(FakeEditor):
+    async def edit_caption(self, chat: str, message_id: int, html: str) -> str:
+        if message_id not in self.existing:
+            raise RuntimeError("пост не найден")
+        self.edited.append(message_id)
+        return "текст тот же — Telegram ничего не менял"
+
+
+async def _not_modified_counts_as_same() -> None:
+    editor = SameEditor(existing={3, 4})
+    poster = Poster(MemoryDb(), SimpleNamespace(), editor)
+    poster.backfill_delay = 0
+    result = await poster.backfill_via_bot(make_window(), start_id=4, html="cap")
+    assert result.updated == 0
+    assert result.same >= 2
+    assert set(editor.edited) == {3, 4}

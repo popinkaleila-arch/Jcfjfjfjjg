@@ -9,7 +9,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified, RPCError
 
 import config
-from bot_editor import BotEditor
+from bot_editor import BotEditor, caption_key
 from bridge import UserbotBridge
 from database import Database, Window
 from formatting import compose_dest_caption, media_fingerprint
@@ -19,7 +19,7 @@ CAPTION_LIMIT = 1024
 BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
 BACKFILL_MISS_STREAK = 60
-BACKFILL_DELAY = 0.25
+BACKFILL_DELAY = 1.2
 
 log = logging.getLogger("poster")
 
@@ -28,9 +28,11 @@ log = logging.getLogger("poster")
 class BackfillResult:
     scanned: int = 0
     updated: int = 0
+    same: int = 0
     skipped: int = 0
     failed: int = 0
     stopped: bool = False
+    waiting: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -325,24 +327,37 @@ class Poster:
         self.backfill_running = True
         result = BackfillResult()
         seen: set[int] = set()
+        previous_wait = getattr(self.editor, "on_wait", None)
+
+        async def on_wait(seconds: int) -> None:
+            result.waiting = int(seconds)
+            if progress:
+                await progress(result)
+
+        self.editor.on_wait = on_wait
         try:
             rights = await self.editor.check_rights(window.dest)
             if not rights.ok:
                 raise RuntimeError(rights.detail)
-            known: list[int] = []
-            if hasattr(self.db, "list_dest_message_ids"):
+            wanted = caption_key(caption)
+            if hasattr(self.db, "list_dest_captions"):
                 try:
-                    known = [int(item) for item in await self.db.list_dest_message_ids(window.dest)]
+                    for message_id, old in await self.db.list_dest_captions(window.dest):
+                        if caption_key(old) == wanted:
+                            seen.add(int(message_id))
+                    result.same = len(seen)
                 except Exception:
-                    log.warning("не смог прочитать журнал постов для правки")
-            if known:
-                await self._scan_ids(window, caption, known, result, limit, progress, seen, use_miss=False)
+                    log.warning("не смог прочитать журнал подписей")
+            if progress:
+                await progress(result)
             if not result.stopped and (limit == 0 or result.updated < limit):
                 await self._scan_ids(window, caption, _iter_ids(start, -1), result, limit, progress, seen, use_miss=True)
             if not result.stopped and (limit == 0 or result.updated < limit):
                 await self._scan_ids(window, caption, _iter_ids(start + 1, 1), result, limit, progress, seen, use_miss=True)
+            result.waiting = 0
             return result
         finally:
+            self.editor.on_wait = previous_wait
             self.backfill_running = False
 
     async def _scan_ids(
@@ -368,8 +383,12 @@ class Poster:
             kind = await self._edit_one_existing(window, message_id, caption)
             seen.add(message_id)
             result.scanned += 1
-            if kind in {"ok", "same"}:
+            result.waiting = 0
+            if kind == "ok":
                 result.updated += 1
+                miss = 0
+            elif kind == "same":
+                result.same += 1
                 miss = 0
             elif kind == "miss":
                 result.skipped += 1
@@ -384,16 +403,24 @@ class Poster:
                     result.errors.append(f"{message_id}: {kind}")
             if use_miss and miss >= BACKFILL_MISS_STREAK:
                 return
-            if progress and result.scanned % 20 == 0:
+            if progress and (kind == "ok" or result.scanned % 15 == 0):
                 await progress(result)
-            if self.backfill_delay:
-                await asyncio.sleep(self.backfill_delay)
+            delay = 0
+            if kind == "ok":
+                delay = self.backfill_delay
+            elif kind in {"miss", "skip", "same"}:
+                delay = min(0.35, self.backfill_delay) if self.backfill_delay else 0
+            if delay:
+                await asyncio.sleep(delay)
 
     async def _edit_one_existing(self, window: Window, message_id: int, html: str) -> str:
         assert self.editor and window.dest
         try:
-            await self.editor.edit_caption(window.dest, message_id, html)
+            status = await self.editor.edit_caption(window.dest, message_id, html)
+            if "тот же" in (status or "").lower():
+                return "same"
             await self._remember(window, message_id, None, html)
+            log.info("описание поста %s/%s обновлено", window.dest, message_id)
             return "ok"
         except Exception as exc:
             text = str(exc).lower()
@@ -472,8 +499,10 @@ class Poster:
         return "описание обновлено юзерботом"
 
 
-def _iter_ids(start: int, step: int):
+def _iter_ids(start: int, step: int, limit: int = 100000):
     current = start
-    while current >= 1:
+    scanned = 0
+    while current >= 1 and scanned < limit:
         yield current
         current += step
+        scanned += 1

@@ -503,9 +503,11 @@ def _backfill_text(result) -> str:
     title = "правка остановлена" if getattr(result, "stopped", False) else "готово"
     lines = [
         f"{title}: просмотрено {result.scanned}",
-        f"обновлено {result.updated}",
+        f"поставлено описаний {result.updated}",
+        f"уже было {getattr(result, 'same', 0)}",
         f"пропущено {result.skipped}",
         f"ошибок {result.failed}",
+        "подпись видно при открытии поста, в сетке медиа Telegram её не показывает.",
     ]
     if result.errors:
         lines.append("первые ошибки:")
@@ -646,8 +648,9 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
         return
 
     status = await message.answer(
-        "правлю ВСЕ существующие посты в фоне.\n"
-        "можно пользоваться панелью. ⏹ Стоп правки — остановить."
+        "ставлю описания на посты без подписи, уже готовые пропускаю.\n"
+        "подпись видно, когда открываешь пост — в сетке медиа её нет.\n"
+        "⏹ Стоп правки — остановить."
         if limit == 0
         else f"правлю до {limit} постов в фоне. ⏹ Стоп правки — остановить."
     )
@@ -655,9 +658,11 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
     async def progress(result) -> None:
         try:
             extra = " (остановка…)" if poster.stop_backfill.is_set() else ""
+            wait = f" жду Telegram {result.waiting}с." if getattr(result, "waiting", 0) else ""
             await status.edit_text(
-                f"иду{extra}: {result.scanned} просмотрено, {result.updated} обновлено, "
-                f"пропущено {result.skipped}, ошибок {result.failed}\n"
+                f"иду{extra}: поставлено {result.updated}, уже было {getattr(result, 'same', 0)}, "
+                f"просмотрено {result.scanned}, пропущено {result.skipped}, ошибок {result.failed}.{wait}\n"
+                "подпись видно при открытии поста.\n"
                 "⏹ Стоп правки — остановить"
             )
         except Exception:

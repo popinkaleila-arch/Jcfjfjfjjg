@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 from dataclasses import dataclass
 
 from aiogram import Bot
@@ -28,6 +30,7 @@ class BotEditor:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         self._username: str | None = None
+        self.on_wait = None
 
     async def username(self) -> str:
         if not self._username:
@@ -128,21 +131,48 @@ class BotEditor:
 
     async def _with_retry(self, fn, **kwargs):
         last: Exception | None = None
-        for _attempt in range(5):
+        for _attempt in range(8):
             try:
                 return await fn(**kwargs)
             except TelegramRetryAfter as exc:
                 last = exc
-                wait = int(getattr(exc, "retry_after", 1) or 1)
-                log.warning("RetryAfter %s сек на правке подписи", wait)
-                await asyncio.sleep(wait + 1)
+                wait = _retry_after(exc) or 1
+            except TelegramBadRequest as exc:
+                wait = _retry_after(exc)
+                if wait is None:
+                    raise
+                last = exc
+            log.warning("RetryAfter %s сек на правке подписи", wait)
+            if self.on_wait:
+                try:
+                    await self.on_wait(wait)
+                except Exception:
+                    pass
+            await asyncio.sleep(wait + 1)
         raise last or RuntimeError("Telegram просит подождать")
 
 
 def _strip_html(text: str) -> str:
-    import re
-
     return re.sub(r"<[^>]+>", "", text or "")
+
+
+def caption_key(text: str) -> str:
+    plain = html.unescape(_strip_html(text or ""))
+    return re.sub(r"\s+", " ", plain).strip()
+
+
+def _retry_after(exc: Exception) -> int | None:
+    wait = getattr(exc, "retry_after", None)
+    if wait:
+        try:
+            return max(1, int(wait))
+        except (TypeError, ValueError):
+            pass
+    message = str(getattr(exc, "message", None) or exc)
+    match = re.search(r"retry after (\d+)", message, re.I)
+    if match:
+        return max(1, int(match.group(1)))
+    return None
 
 
 def _humanize(raw: str | None, hint: str) -> str:
