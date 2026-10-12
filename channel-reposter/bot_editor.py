@@ -83,20 +83,49 @@ class BotEditor:
                 message_id=message_id,
                 caption=text or None,
                 parse_mode=parse,
-                show_caption_above_media=bool(text),
+                show_caption_above_media=False,
             )
             if text and isinstance(edited, Message) and not (edited.caption or edited.text):
                 raise RuntimeError("Telegram принял правку, но подпись пустая")
+            if isinstance(edited, Message) and getattr(edited, "show_caption_above_media", False):
+                return await self._force_caption_below(chat, message_id, text, parse)
             return "описание обновлено ботом"
         except TelegramBadRequest as exc:
             message = (exc.message or "").lower()
             if "message is not modified" in message:
+                if text:
+                    return await self._force_caption_below(chat, message_id, text, parse)
                 return "текст тот же — Telegram ничего не менял"
             if "there is no caption" in message or "message can't be edited" in message:
                 return await self._edit_as_text(chat, message_id, text, parse, exc)
             raise RuntimeError(_humanize(exc.message, await self.hint())) from exc
         except TelegramForbiddenError as exc:
             raise RuntimeError(_humanize(str(exc), await self.hint())) from exc
+
+    async def _force_caption_below(self, chat: str, message_id: int, text: str, parse: ParseMode | None) -> str:
+        bumped = (text + "\u2060")[:CAPTION_LIMIT]
+        try:
+            await self._with_retry(
+                self.bot.edit_message_caption,
+                chat_id=chat,
+                message_id=message_id,
+                caption=bumped,
+                parse_mode=parse,
+                show_caption_above_media=False,
+            )
+        except TelegramBadRequest:
+            pass
+        edited = await self._with_retry(
+            self.bot.edit_message_caption,
+            chat_id=chat,
+            message_id=message_id,
+            caption=text or None,
+            parse_mode=parse,
+            show_caption_above_media=False,
+        )
+        if text and isinstance(edited, Message) and not (edited.caption or edited.text):
+            raise RuntimeError("Telegram принял правку, но подпись пустая")
+        return "описание обновлено ботом"
 
     async def _edit_as_text(
         self,

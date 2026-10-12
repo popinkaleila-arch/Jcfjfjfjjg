@@ -340,15 +340,6 @@ class Poster:
             rights = await self.editor.check_rights(window.dest)
             if not rights.ok:
                 raise RuntimeError(rights.detail)
-            wanted = caption.strip()
-            if hasattr(self.db, "list_dest_captions"):
-                try:
-                    for message_id, old in await self.db.list_dest_captions(window.dest):
-                        if (old or "").strip() == wanted:
-                            seen.add(int(message_id))
-                    result.same = len(seen)
-                except Exception:
-                    log.warning("не смог прочитать журнал подписей")
             if progress:
                 await progress(result)
             if not result.stopped and (limit == 0 or result.updated < limit):

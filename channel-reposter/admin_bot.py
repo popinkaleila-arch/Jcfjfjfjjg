@@ -648,7 +648,7 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
         return
 
     status = await message.answer(
-        "ставлю описания над медиа, HTML упрощаю чтобы Telegram их показывал.\n"
+        "ставлю описания под фото/видео.\n"
         "в сетке медиа подписи нет — смотрите открытый пост.\n"
         "⏹ Стоп правки — остановить."
         if limit == 0

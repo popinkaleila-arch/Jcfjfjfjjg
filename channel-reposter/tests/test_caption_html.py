@@ -1,6 +1,7 @@
+import asyncio
 from types import SimpleNamespace
 
-from bot_editor import _strip_html, caption_key
+from bot_editor import BotEditor, _strip_html, caption_key
 from formatting import apply_caption_template, compose_dest_caption, normalize_caption_html, pyrogram_to_html
 
 
@@ -53,3 +54,29 @@ def test_normalize_flattens_nested_italic_and_fancy_letters() -> None:
 
 def test_normalize_keeps_simple_bold() -> None:
     assert normalize_caption_html("<b>x</b>") == "<b>x</b>"
+
+
+class _CaptionBot:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def edit_message_caption(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            caption=kwargs.get("caption"),
+            text=None,
+            show_caption_above_media=kwargs.get("show_caption_above_media"),
+        )
+
+
+def test_edit_puts_caption_below_media() -> None:
+    asyncio.run(_edit_puts_caption_below_media())
+
+
+async def _edit_puts_caption_below_media() -> None:
+    bot = _CaptionBot()
+    editor = BotEditor(bot)  # type: ignore[arg-type]
+    await editor.edit_caption("@ch", 9, "<b>hello</b>")
+    assert bot.calls
+    assert bot.calls[0]["show_caption_above_media"] is False
+    assert "hello" in (bot.calls[0]["caption"] or "")

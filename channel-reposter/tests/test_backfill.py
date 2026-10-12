@@ -153,9 +153,8 @@ async def _skips_posts_that_already_have_caption() -> None:
     poster = Poster(db, SimpleNamespace(), editor)
     poster.backfill_delay = 0
     result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
-    assert set(editor.edited) == {2, 5}
-    assert result.updated == 2
-    assert result.same >= 2
+    assert set(editor.edited) == existing
+    assert result.updated == 4
 
 
 def test_not_modified_counts_as_same() -> None:
