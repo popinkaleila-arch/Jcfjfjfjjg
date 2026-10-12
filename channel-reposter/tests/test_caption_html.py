@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from bot_editor import _strip_html
 from formatting import apply_caption_template, compose_dest_caption, pyrogram_to_html
 
 
@@ -24,3 +25,7 @@ def test_compose_prefers_source_when_no_template() -> None:
 
 def test_compose_template_only() -> None:
     assert compose_dest_caption("<b>бренд</b>", SimpleNamespace(caption=None, text=None)) == "<b>бренд</b>"
+
+
+def test_strip_html_keeps_plain_text() -> None:
+    assert _strip_html('<b>VPN</b> <a href="https://t.me/x">shop</a>') == "VPN shop"

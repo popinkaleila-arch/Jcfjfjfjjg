@@ -130,6 +130,7 @@ async def amain() -> None:
     def _stop(*_args: object) -> None:
         stop.set()
         bridge.stop_cycle.set()
+        poster.stop_backfill.set()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

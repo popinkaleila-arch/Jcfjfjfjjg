@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -55,7 +56,7 @@ def keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔐 Вход юзербота"), KeyboardButton(text="📊 Статус")],
             [KeyboardButton(text="📥 Источник"), KeyboardButton(text="📤 Назначение"), KeyboardButton(text="⭐ Избранное")],
             [KeyboardButton(text="🔗 Старт-ссылка"), KeyboardButton(text="📜 С начала"), KeyboardButton(text="✏️ Описание")],
-            [KeyboardButton(text="🖊 Правка поста"), KeyboardButton(text="🖊 Существующие")],
+            [KeyboardButton(text="🖊 Правка поста"), KeyboardButton(text="🖊 Существующие"), KeyboardButton(text="⏹ Стоп правки")],
             [KeyboardButton(text="⏱ Интервал"), KeyboardButton(text="📦 Лимит"), KeyboardButton(text="🧹 Чистый перелив")],
             [KeyboardButton(text="🤖 Бот правит подписи")],
             [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="⏹ Стоп")],
@@ -78,7 +79,21 @@ async def _guard(message: Message) -> bool:
     return True
 
 
-async def status_text(db: Database, bridge: UserbotBridge, editor: BotEditor | None = None) -> str:
+def parse_backfill_limit(text: str) -> int | None:
+    raw = (text or "").strip().lower()
+    if raw in {"все", "all", "всё"}:
+        return 0
+    if raw.isdigit():
+        return max(1, int(raw))
+    return None
+
+
+async def status_text(
+    db: Database,
+    bridge: UserbotBridge,
+    editor: BotEditor | None = None,
+    poster: Poster | None = None,
+) -> str:
     windows = await db.list_windows()
     current = await db.current_window()
     running = any_running(windows)
@@ -98,6 +113,7 @@ async def status_text(db: Database, bridge: UserbotBridge, editor: BotEditor | N
         f"лимит: {current.posts_per_cycle}",
         f"фильтр: {'чистый' if current.clean_filter else 'все посты'}",
         f"бот правит подписи: {'вкл' if current.bot_edit else 'выкл'}",
+        f"правка описаний: {'идёт — ⏹ Стоп правки остановит' if poster and poster.caption_edit_active() else 'нет'}",
         f"очередь≈{queued}  всего={posted}",
         f"источник: {format_chat(current.source)}",
         f"назначение: {format_chat(current.dest)}",
@@ -125,15 +141,15 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
     await state.clear()
-    db, bridge, *_rest = _ctx(message)
-    editor = _rest[-1] if _rest else None
+    db, bridge, _auth, poster, editor = _ctx(message)
     await message.answer(
         "Channel Reposter — панель управления.\n\n"
         "1) 🔐 Вход юзербота (api_id, api_hash, телефон, код)\n"
         "2) 📥 Источник и 📤 Назначение\n"
         "3) выдайте @ZzzLV_bot админку назначения с правом менять сообщения\n"
-        "4) ▶️ Старт — бот сам проставит описание с форматированием\n\n"
-        + await status_text(db, bridge, editor),
+        "4) ▶️ Старт — бот сам проставит описание с форматированием\n"
+        "🖊 Существующие — описание на все уже залитые посты, ⏹ Стоп правки — остановить\n\n"
+        + await status_text(db, bridge, editor, poster),
         reply_markup=keyboard(),
     )
 
@@ -143,9 +159,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 async def cmd_status(message: Message) -> None:
     if not await _guard(message):
         return
-    db, bridge, *_rest = _ctx(message)
-    editor = _rest[-1] if _rest else None
-    await message.answer(await status_text(db, bridge, editor), reply_markup=keyboard())
+    db, bridge, _auth, poster, editor = _ctx(message)
+    await message.answer(await status_text(db, bridge, editor, poster), reply_markup=keyboard())
 
 
 @router.message(F.text == "🔐 Вход юзербота")
@@ -163,7 +178,11 @@ async def login_start(message: Message, state: FSMContext) -> None:
 async def cancel(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
+    _db, _bridge, _auth, poster, _editor = _ctx(message)
     await state.clear()
+    if poster.request_stop_backfill():
+        await message.answer("правка описаний останавливается", reply_markup=keyboard())
+        return
     await message.answer("отменено", reply_markup=keyboard())
 
 
@@ -481,8 +500,9 @@ async def apply_edit_post(message: Message, state: FSMContext) -> None:
 
 
 def _backfill_text(result) -> str:
+    title = "правка остановлена" if getattr(result, "stopped", False) else "готово"
     lines = [
-        f"готово: просмотрено {result.scanned}",
+        f"{title}: просмотрено {result.scanned}",
         f"обновлено {result.updated}",
         f"пропущено {result.skipped}",
         f"ошибок {result.failed}",
@@ -493,6 +513,32 @@ def _backfill_text(result) -> str:
     return "\n".join(lines)
 
 
+def _is_stop_edit(text: str) -> bool:
+    raw = (text or "").strip().lower()
+    return raw in {"⏹ стоп правки", "стоп правки"} or (text or "").strip() == "⏹ Стоп правки"
+
+
+def _is_stop_all(text: str) -> bool:
+    return (text or "").strip() in {"⏹ Стоп"} or (text or "").strip().lower() == "стоп"
+
+
+async def _stop_caption_edit(message: Message, also_autopost: bool = False) -> None:
+    db, bridge, _auth, poster, _editor = _ctx(message)
+    stopped_edit = poster.request_stop_backfill()
+    if also_autopost:
+        bridge.stop_cycle.set()
+        await db.global_pause(True, stop_enabled=True)
+        if stopped_edit:
+            await message.answer("стоп: правка описаний останавливается, автопост выключен", reply_markup=keyboard())
+        else:
+            await message.answer("стоп: цикл оборван, автопост выключен", reply_markup=keyboard())
+        return
+    if stopped_edit:
+        await message.answer("правка описаний останавливается. уже проставленные подписи остаются", reply_markup=keyboard())
+        return
+    await message.answer("правка описаний сейчас не идёт", reply_markup=keyboard())
+
+
 @router.message(Command("backfill"))
 @router.message(F.text == "🖊 Существующие")
 async def ask_backfill(message: Message, state: FSMContext) -> None:
@@ -500,8 +546,8 @@ async def ask_backfill(message: Message, state: FSMContext) -> None:
         return
     db, _bridge, _auth, poster, editor = _ctx(message)
     win = await db.current_window()
-    if poster.backfill_running:
-        await message.answer("правка существующих уже идёт")
+    if poster.caption_edit_active():
+        await message.answer("правка существующих уже идёт. ⏹ Стоп правки — остановить")
         return
     if win.dest and editor:
         rights = await editor.check_rights(win.dest)
@@ -512,14 +558,16 @@ async def ask_backfill(message: Message, state: FSMContext) -> None:
             )
             return
     await state.set_state(Form.backfill)
-    await state.update_data(bf_caption="", bf_start=0, bf_limit=500)
+    await state.update_data(bf_caption="", bf_start=0, bf_limit=0)
     hint = "есть шаблон ✏️ Описание — можно сразу прислать пост" if win.caption else "шаблона нет — сначала пришлите новое описание"
     await message.answer(
         "правлю уже залитые посты только через этого бота, без юзербота.\n"
+        "по умолчанию — ВСЕ посты, пока они находятся.\n"
+        "⏹ Стоп правки — остановить в любой момент.\n"
         f"{hint}\n\n"
         "1) пришлите новое описание (жирный, ссылки и т.д. сохранятся) или напишите «шаблон»\n"
         "2) перешлите любой пост из канала-назначения или ссылку t.me/…/123\n"
-        "по желанию число — сколько постов максимум (по умолчанию 500, «все» — 800)\n"
+        "по желанию число — сколько постов максимум, «все» — без лимита\n"
         "/cancel — отмена"
     )
 
@@ -529,13 +577,22 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
     if not await _guard(message):
         return
     db, _bridge, _auth, poster, editor = _ctx(message)
+    text = (message.text or "").strip()
+    if _is_stop_edit(text):
+        await state.clear()
+        await _stop_caption_edit(message)
+        return
+    if _is_stop_all(text):
+        await state.clear()
+        await _stop_caption_edit(message, also_autopost=True)
+        return
     win = await db.current_window()
     data = await state.get_data()
     caption = data.get("bf_caption") or ""
     start_id = int(data.get("bf_start") or 0)
-    limit = int(data.get("bf_limit") or 500)
-    text = (message.text or "").strip()
+    limit = int(data.get("bf_limit") or 0)
     point = forwarded_point(message)
+    parsed_limit = parse_backfill_limit(text)
 
     if point or (text and "t.me/" in text.lower()):
         if not point:
@@ -558,12 +615,11 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
             return
         caption = win.caption
         await state.update_data(bf_caption=caption)
-    elif text.lower() in {"все", "all"}:
-        limit = 800
+    elif parsed_limit is not None:
+        limit = parsed_limit
         await state.update_data(bf_limit=limit)
-    elif text.isdigit():
-        limit = max(1, min(int(text), 800))
-        await state.update_data(bf_limit=limit)
+        await message.answer("без лимита — все посты" if limit == 0 else f"лимит правки: {limit} постов")
+        return
     elif text or message.caption:
         caption = message_to_html(message)
         await state.update_data(bf_caption=caption)
@@ -584,24 +640,37 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
         await message.answer("есть пост. теперь пришлите новое описание или «шаблон».")
         return
 
-    status = await message.answer("правлю существующие посты через бота…")
+    await state.clear()
+    if poster.caption_edit_active():
+        await message.answer("правка существующих уже идёт. ⏹ Стоп правки — остановить", reply_markup=keyboard())
+        return
+
+    status = await message.answer(
+        "правлю ВСЕ существующие посты в фоне.\n"
+        "можно пользоваться панелью. ⏹ Стоп правки — остановить."
+        if limit == 0
+        else f"правлю до {limit} постов в фоне. ⏹ Стоп правки — остановить."
+    )
 
     async def progress(result) -> None:
         try:
+            extra = " (остановка…)" if poster.stop_backfill.is_set() else ""
             await status.edit_text(
-                f"иду: {result.scanned} просмотрено, {result.updated} обновлено, ошибок {result.failed}"
+                f"иду{extra}: {result.scanned} просмотрено, {result.updated} обновлено, "
+                f"пропущено {result.skipped}, ошибок {result.failed}\n"
+                "⏹ Стоп правки — остановить"
             )
         except Exception:
             pass
 
-    try:
-        result = await poster.backfill_via_bot(win, start_id, caption, limit=limit, progress=progress)
-    except Exception as exc:
-        await state.clear()
-        await message.answer(f"не вышло: {exc}", reply_markup=keyboard())
-        return
-    await state.clear()
-    await message.answer(_backfill_text(result), reply_markup=keyboard())
+    async def runner() -> None:
+        try:
+            result = await poster.backfill_via_bot(win, start_id, caption, limit=limit, progress=progress)
+            await message.answer(_backfill_text(result), reply_markup=keyboard())
+        except Exception as exc:
+            await message.answer(f"не вышло: {exc}", reply_markup=keyboard())
+
+    poster.backfill_task = asyncio.create_task(runner())
 
 
 @router.message(F.text == "⏱ Интервал")
@@ -729,14 +798,18 @@ async def pause(message: Message) -> None:
     await message.answer("пауза: текущий цикл доработает, новые не стартуют", reply_markup=keyboard())
 
 
+@router.message(F.text == "⏹ Стоп правки")
+async def stop_edits(message: Message) -> None:
+    if not await _guard(message):
+        return
+    await _stop_caption_edit(message)
+
+
 @router.message(F.text == "⏹ Стоп")
 async def stop(message: Message) -> None:
     if not await _guard(message):
         return
-    db, bridge, *_ = _ctx(message)
-    bridge.stop_cycle.set()
-    await db.global_pause(True, stop_enabled=True)
-    await message.answer("стоп: цикл оборван, автопост выключен", reply_markup=keyboard())
+    await _stop_caption_edit(message, also_autopost=True)
 
 
 @router.message(F.text == "🪟 Окна")

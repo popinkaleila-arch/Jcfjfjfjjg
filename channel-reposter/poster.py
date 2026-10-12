@@ -18,7 +18,8 @@ from transfer_filters import album_is_clean, should_skip
 CAPTION_LIMIT = 1024
 BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
-BACKFILL_MISS_STREAK = 18
+BACKFILL_MISS_STREAK = 60
+BACKFILL_DELAY = 0.25
 
 log = logging.getLogger("poster")
 
@@ -29,6 +30,7 @@ class BackfillResult:
     updated: int = 0
     skipped: int = 0
     failed: int = 0
+    stopped: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -38,6 +40,9 @@ class Poster:
         self.bridge = bridge
         self.editor = editor
         self.backfill_running = False
+        self.stop_backfill = asyncio.Event()
+        self.backfill_task: asyncio.Task | None = None
+        self.backfill_delay = BACKFILL_DELAY
 
     async def run_window(self, window: Window) -> int:
         if self.bridge.stop_cycle.is_set():
@@ -286,12 +291,21 @@ class Poster:
         finally:
             self.backfill_running = False
 
+    def caption_edit_active(self) -> bool:
+        return self.backfill_running or (self.backfill_task is not None and not self.backfill_task.done())
+
+    def request_stop_backfill(self) -> bool:
+        if not self.caption_edit_active():
+            return False
+        self.stop_backfill.set()
+        return True
+
     async def backfill_via_bot(
         self,
         window: Window,
         start_id: int,
         html: str,
-        limit: int = 500,
+        limit: int = 0,
         progress=None,
     ) -> BackfillResult:
         if self.backfill_running:
@@ -305,27 +319,54 @@ class Poster:
             raise RuntimeError("пришлите новое описание в бота — юзербот для этого не нужен")
         if len(caption) > CAPTION_LIMIT:
             raise RuntimeError(f"подпись длиннее {CAPTION_LIMIT} символов")
-        rights = await self.editor.check_rights(window.dest)
-        if not rights.ok:
-            raise RuntimeError(rights.detail)
-        limit = max(1, min(int(limit), BACKFILL_MAX))
+        limit = max(0, int(limit))
+        start = max(1, int(start_id))
+        self.stop_backfill.clear()
         self.backfill_running = True
         result = BackfillResult()
+        seen: set[int] = set()
         try:
-            start = max(1, int(start_id))
-            await self._scan_ids(window, caption, range(start, start + 2000), result, limit, progress)
-            if result.updated < limit and start > 1:
-                await self._scan_ids(window, caption, range(start - 1, 0, -1), result, limit, progress)
+            rights = await self.editor.check_rights(window.dest)
+            if not rights.ok:
+                raise RuntimeError(rights.detail)
+            known: list[int] = []
+            if hasattr(self.db, "list_dest_message_ids"):
+                try:
+                    known = [int(item) for item in await self.db.list_dest_message_ids(window.dest)]
+                except Exception:
+                    log.warning("не смог прочитать журнал постов для правки")
+            if known:
+                await self._scan_ids(window, caption, known, result, limit, progress, seen, use_miss=False)
+            if not result.stopped and (limit == 0 or result.updated < limit):
+                await self._scan_ids(window, caption, _iter_ids(start, -1), result, limit, progress, seen, use_miss=True)
+            if not result.stopped and (limit == 0 or result.updated < limit):
+                await self._scan_ids(window, caption, _iter_ids(start + 1, 1), result, limit, progress, seen, use_miss=True)
             return result
         finally:
             self.backfill_running = False
 
-    async def _scan_ids(self, window, caption, ids, result: BackfillResult, limit: int, progress) -> None:
+    async def _scan_ids(
+        self,
+        window,
+        caption,
+        ids,
+        result: BackfillResult,
+        limit: int,
+        progress,
+        seen: set[int],
+        use_miss: bool,
+    ) -> None:
         miss = 0
         for message_id in ids:
-            if result.updated >= limit:
+            if self.stop_backfill.is_set():
+                result.stopped = True
                 return
+            if limit and result.updated >= limit:
+                return
+            if message_id in seen:
+                continue
             kind = await self._edit_one_existing(window, message_id, caption)
+            seen.add(message_id)
             result.scanned += 1
             if kind in {"ok", "same"}:
                 result.updated += 1
@@ -341,11 +382,12 @@ class Poster:
                 miss = 0
                 if len(result.errors) < 8:
                     result.errors.append(f"{message_id}: {kind}")
-            if miss >= BACKFILL_MISS_STREAK:
+            if use_miss and miss >= BACKFILL_MISS_STREAK:
                 return
-            if progress and result.scanned % 25 == 0:
+            if progress and result.scanned % 20 == 0:
                 await progress(result)
-            await asyncio.sleep(0.3)
+            if self.backfill_delay:
+                await asyncio.sleep(self.backfill_delay)
 
     async def _edit_one_existing(self, window: Window, message_id: int, html: str) -> str:
         assert self.editor and window.dest
@@ -359,7 +401,12 @@ class Poster:
                 return "miss"
             if "тот же" in text or "not modified" in text:
                 return "same"
-            if "не даёт править" in text or "can't be edited" in text:
+            if (
+                "нет поля подписи" in text
+                or "no caption" in text
+                or "не даёт править" in text
+                or "can't be edited" in text
+            ):
                 return "skip"
             if "прав" in text or "administrator" in text or "admin" in text:
                 raise
@@ -423,3 +470,10 @@ class Poster:
                 raise RuntimeError(f"не удалось править пост: {detail}") from text_error
         await self.db.update_post_caption(chat, message_id, text)
         return "описание обновлено юзерботом"
+
+
+def _iter_ids(start: int, step: int):
+    current = start
+    while current >= 1:
+        yield current
+        current += step

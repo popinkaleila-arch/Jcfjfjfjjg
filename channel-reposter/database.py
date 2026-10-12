@@ -356,6 +356,14 @@ class Database:
         assert row
         return self._row_to_post(row)
 
+    async def list_dest_message_ids(self, dest: str) -> list[int]:
+        cur = await self.db.execute(
+            "SELECT dest_msg_id FROM posts WHERE dest = ? ORDER BY dest_msg_id DESC",
+            (dest,),
+        )
+        rows = await cur.fetchall()
+        return [int(row[0]) for row in rows]
+
     async def list_recent_posts(self, window_id: int | None = None, limit: int = 10) -> list[PublishedPost]:
         if window_id is None:
             cur = await self.db.execute(

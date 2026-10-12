@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from admin_bot import parse_backfill_limit
 from links import format_post_link, forwarded_point, preview_caption
 
 
@@ -40,3 +41,11 @@ def test_forwarded_legacy() -> None:
     assert point is not None
     assert point.chat == "-1003702880360"
     assert point.message_id == 15
+
+
+def test_parse_backfill_all() -> None:
+    assert parse_backfill_limit("все") == 0
+    assert parse_backfill_limit("всё") == 0
+    assert parse_backfill_limit("all") == 0
+    assert parse_backfill_limit("120") == 120
+    assert parse_backfill_limit("шаблон") is None
