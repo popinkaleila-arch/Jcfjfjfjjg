@@ -179,6 +179,20 @@ async def _down_from_newest_after_short_gap() -> None:
     assert result.skipped < 25
 
 
+def test_gap_does_not_stop_before_older_posts() -> None:
+    asyncio.run(_gap_does_not_stop_before_older_posts())
+
+
+async def _gap_does_not_stop_before_older_posts() -> None:
+    editor = FakeEditor(existing={5, 200})
+    poster = Poster(MemoryDb(), SimpleNamespace(), editor)
+    poster.backfill_delay = 0
+    result = await poster.backfill_via_bot(make_window(), start_id=200, html="cap")
+    assert editor.edited[0] == 200
+    assert 5 in editor.edited
+    assert result.updated == 2
+
+
 def test_idle_stop_is_false() -> None:
     poster = Poster(MemoryDb(), SimpleNamespace(), FakeEditor())
     assert poster.request_stop_backfill() is False
@@ -195,9 +209,11 @@ async def _skips_posts_that_already_have_caption() -> None:
     poster = Poster(db, SimpleNamespace(), editor)
     poster.backfill_delay = 0
     result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
-    assert set(editor.edited) == existing
-    assert result.updated == 4
-    assert editor.edited[0] == 40
+    assert set(editor.edited) == {2, 5}
+    assert 40 not in editor.edited
+    assert 10 not in editor.edited
+    assert result.updated == 2
+    assert result.same >= 2
 
 
 def test_not_modified_counts_as_same() -> None:

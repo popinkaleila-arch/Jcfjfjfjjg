@@ -673,11 +673,14 @@ async def _run_backfill(message: Message, poster: Poster, win, start_id: int, ca
         try:
             extra = " (остановка…)" if poster.stop_backfill.is_set() else ""
             wait = f" жду Telegram {result.waiting}с." if getattr(result, "waiting", 0) else ""
+            current = int(getattr(result, "current_id", 0) or 0)
+            link = format_post_link(str(win.dest), current) if current and win.dest else ""
             await status.edit_text(
-                f"иду{extra}: пост {getattr(result, 'current_id', 0)}\n"
-                f"поставлено {result.updated}, уже стояло это описание {getattr(result, 'same', 0)}, "
+                f"иду{extra}: {link or current}\n"
+                f"поставлено {result.updated}, уже было это описание {getattr(result, 'same', 0)}, "
                 f"просмотрено {result.scanned}, пустых {result.skipped}, ошибок {result.failed}.{wait}\n"
-                "подпись под фото. ⏹ Стоп правки — остановить"
+                "откройте ссылку — подпись под фото, в сетке её нет.\n"
+                "⏹ Стоп правки — остановить"
             )
         except Exception:
             pass
@@ -906,6 +909,20 @@ async def start_all(message: Message) -> None:
     await db.start_all()
     bridge.stop_cycle.clear()
     await message.answer("все заполненные окна запущены", reply_markup=keyboard())
+
+
+@router.message()
+async def fallback(message: Message) -> None:
+    if not await _guard(message):
+        return
+    _db, _bridge, _auth, poster, _editor = _ctx(message)
+    if poster.caption_edit_active():
+        await message.answer("правка описаний уже идёт. ⏹ Стоп правки — остановить, потом пришлите новый текст.")
+        return
+    await message.answer(
+        "не разобрал сообщение.\n🖊 Существующие — новое описание, затем ссылка на канал.",
+        reply_markup=keyboard(),
+    )
 
 
 def build_dispatcher() -> Dispatcher:

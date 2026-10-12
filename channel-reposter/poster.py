@@ -19,8 +19,8 @@ CAPTION_LIMIT = 1024
 BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
 BACKFILL_MISS_STREAK = 80
-BACKFILL_DELAY = 1.6
-UPWARD_PROBE = 8
+BACKFILL_DELAY = 1.2
+UPWARD_PROBE = 12
 
 log = logging.getLogger("poster")
 
@@ -35,6 +35,7 @@ class BackfillResult:
     stopped: bool = False
     waiting: int = 0
     current_id: int = 0
+    top_hit: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -349,7 +350,20 @@ class Poster:
                 except Exception:
                     pass
             start = max(1, start)
-            log.info("caption backfill %s from newest=%s, rewrite all media", window.dest, start)
+            if hasattr(self.db, "list_dest_captions"):
+                try:
+                    for message_id, old in await self.db.list_dest_captions(window.dest):
+                        if normalize_caption_html(old or "").strip() == caption:
+                            seen.add(int(message_id))
+                except Exception:
+                    log.warning("не смог прочитать журнал подписей")
+            result.same = len(seen)
+            log.info(
+                "caption backfill %s from %s, уже с этим текстом %s, дальше все медиа до начала канала",
+                window.dest,
+                start,
+                result.same,
+            )
             if progress:
                 await progress(result)
             if not result.stopped and (limit == 0 or result.updated < limit):
@@ -364,18 +378,19 @@ class Poster:
                     use_miss=True,
                     miss_needs_hit=False,
                     streak=UPWARD_PROBE,
+                    track_top=True,
                 )
-            if not result.stopped and (limit == 0 or result.updated < limit) and start > 1:
+            ceiling = result.top_hit or start
+            if not result.stopped and (limit == 0 or result.updated < limit) and ceiling > 1:
                 await self._scan_ids(
                     window,
                     caption,
-                    _iter_ids(start - 1, -1),
+                    _iter_ids(ceiling - 1, -1),
                     result,
                     limit,
                     progress,
                     seen,
-                    use_miss=True,
-                    miss_needs_hit=True,
+                    use_miss=False,
                 )
             result.waiting = 0
             return result
@@ -395,6 +410,7 @@ class Poster:
         use_miss: bool,
         miss_needs_hit: bool = True,
         streak: int | None = None,
+        track_top: bool = False,
     ) -> None:
         miss = 0
         hits = 0
@@ -419,6 +435,8 @@ class Poster:
             result.scanned += 1
             result.current_id = message_id
             result.waiting = 0
+            if kind != "miss" and track_top:
+                result.top_hit = message_id
             if kind == "ok":
                 result.updated += 1
                 miss = 0
@@ -440,7 +458,7 @@ class Poster:
                 hits += 1
                 if len(result.errors) < 8:
                     result.errors.append(f"{message_id}: {kind}")
-            if use_miss and miss >= miss_limit and (hits or not miss_needs_hit):
+            if use_miss and miss_limit and miss >= miss_limit and (hits or not miss_needs_hit):
                 return
             if progress and (kind == "ok" or result.scanned % 15 == 0):
                 await progress(result)
@@ -456,7 +474,6 @@ class Poster:
 
     async def _edit_one_existing(self, window: Window, message_id: int, html: str) -> str:
         assert self.editor and window.dest
-        log.info("правка %s/%s", window.dest, message_id)
         try:
             status = await self.editor.edit_caption(window.dest, message_id, html, media_only=True)
             if "тот же" in (status or "").lower():
