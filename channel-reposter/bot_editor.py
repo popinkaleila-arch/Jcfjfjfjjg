@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.types import ChatMemberAdministrator, ChatMemberOwner
+from aiogram.types import ChatMemberAdministrator, ChatMemberOwner, Message
+
+from formatting import normalize_caption_html
 
 log = logging.getLogger("bot_editor")
 
@@ -61,7 +63,7 @@ class BotEditor:
         return BotRights(False, f"бот в чате, но не админ. {await self.hint()}")
 
     async def edit_caption(self, chat: str, message_id: int, caption: str) -> str:
-        text = caption or ""
+        text = normalize_caption_html(caption or "")
         if len(text) > CAPTION_LIMIT:
             raise RuntimeError(f"подпись длиннее {CAPTION_LIMIT} символов")
         parse = ParseMode.HTML if text else None
@@ -75,13 +77,16 @@ class BotEditor:
 
     async def _edit_caption_once(self, chat: str, message_id: int, text: str, parse: ParseMode | None) -> str:
         try:
-            await self._with_retry(
+            edited = await self._with_retry(
                 self.bot.edit_message_caption,
                 chat_id=chat,
                 message_id=message_id,
                 caption=text or None,
                 parse_mode=parse,
+                show_caption_above_media=bool(text),
             )
+            if text and isinstance(edited, Message) and not (edited.caption or edited.text):
+                raise RuntimeError("Telegram принял правку, но подпись пустая")
             return "описание обновлено ботом"
         except TelegramBadRequest as exc:
             message = (exc.message or "").lower()

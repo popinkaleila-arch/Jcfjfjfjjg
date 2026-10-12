@@ -9,7 +9,8 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified, RPCError
 
 import config
-from bot_editor import BotEditor, caption_key
+from bot_editor import BotEditor
+from formatting import normalize_caption_html
 from bridge import UserbotBridge
 from database import Database, Window
 from formatting import compose_dest_caption, media_fingerprint
@@ -19,7 +20,7 @@ CAPTION_LIMIT = 1024
 BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
 BACKFILL_MISS_STREAK = 60
-BACKFILL_DELAY = 1.2
+BACKFILL_DELAY = 3.0
 
 log = logging.getLogger("poster")
 
@@ -316,7 +317,7 @@ class Poster:
             raise RuntimeError("редактор бота не подключён")
         if not window.dest:
             raise RuntimeError("сначала укажите назначение или пришлите ссылку на пост")
-        caption = (html or "").strip()
+        caption = normalize_caption_html((html or "").strip())
         if not caption:
             raise RuntimeError("пришлите новое описание в бота — юзербот для этого не нужен")
         if len(caption) > CAPTION_LIMIT:
@@ -339,11 +340,11 @@ class Poster:
             rights = await self.editor.check_rights(window.dest)
             if not rights.ok:
                 raise RuntimeError(rights.detail)
-            wanted = caption_key(caption)
+            wanted = caption.strip()
             if hasattr(self.db, "list_dest_captions"):
                 try:
                     for message_id, old in await self.db.list_dest_captions(window.dest):
-                        if caption_key(old) == wanted:
+                        if (old or "").strip() == wanted:
                             seen.add(int(message_id))
                     result.same = len(seen)
                 except Exception:

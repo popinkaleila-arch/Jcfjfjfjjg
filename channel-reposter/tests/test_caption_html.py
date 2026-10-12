@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from bot_editor import _strip_html, caption_key
-from formatting import apply_caption_template, compose_dest_caption, pyrogram_to_html
+from formatting import apply_caption_template, compose_dest_caption, normalize_caption_html, pyrogram_to_html
 
 
 def test_pyrogram_caption_html() -> None:
@@ -35,3 +35,21 @@ def test_caption_key_ignores_nested_tags() -> None:
     nested = '<i>🌐 </i><a href="https://t.me/x"><i>VPN</i></a><i> click</i>'
     stored = '🌐 <a href="https://t.me/x">VPN</a> click'
     assert caption_key(nested) == caption_key(stored)
+
+
+def test_normalize_flattens_nested_italic_and_fancy_letters() -> None:
+    raw = (
+        '<i>🌐 </i><a href="https://t.me/Paskod_robot?start=refi5JDXgO3"><i>Лучший\u200a𝖵𝖯𝖭</i></a>'
+        "<i>\u200a\u200a\u200a&lt; click \n@sweetshopxxx_bot</i>"
+    )
+    out = normalize_caption_html(raw)
+    assert "𝖵" not in out
+    assert "VPN" in out
+    assert '<a href="https://t.me/Paskod_robot?start=refi5JDXgO3">' in out
+    assert "<i>" not in out
+    assert "@sweetshopxxx_bot" in out
+    assert normalize_caption_html(out) == out
+
+
+def test_normalize_keeps_simple_bold() -> None:
+    assert normalize_caption_html("<b>x</b>") == "<b>x</b>"
