@@ -21,6 +21,7 @@ from links import (
     format_post_link,
     forwarded_point,
     normalize_chat,
+    parse_channel_or_post,
     parse_duration,
     parse_start_link,
     preview_caption,
@@ -148,7 +149,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "2) 📥 Источник и 📤 Назначение\n"
         "3) выдайте @ZzzLV_bot админку назначения с правом менять сообщения\n"
         "4) ▶️ Старт — бот сам проставит описание с форматированием\n"
-        "🖊 Существующие — описание на все уже залитые посты, ⏹ Стоп правки — остановить\n\n"
+        "🖊 Существующие — новое описание + ссылка на канал, правлю все медиа с самого свежего\n\n"
         + await status_text(db, bridge, editor, poster),
         reply_markup=keyboard(),
     )
@@ -559,27 +560,14 @@ async def ask_backfill(message: Message, state: FSMContext) -> None:
                 f"{rights.detail}"
             )
             return
-    if win.dest and win.caption:
-        known = []
-        if hasattr(db, "list_dest_message_ids"):
-            try:
-                known = await db.list_dest_message_ids(win.dest)
-            except Exception:
-                known = []
-        start_id = (max(known) if known else 8000) + 40
-        await _run_backfill(message, poster, win, start_id, win.caption, 0)
-        return
     await state.set_state(Form.backfill)
     await state.update_data(bf_caption="", bf_start=0, bf_limit=0)
-    hint = "есть шаблон ✏️ Описание — можно сразу прислать пост" if win.caption else "шаблона нет — сначала пришлите новое описание"
     await message.answer(
-        "правлю уже залитые посты только через этого бота, без юзербота.\n"
-        "по умолчанию — ВСЕ посты, пока они находятся.\n"
-        "⏹ Стоп правки — остановить в любой момент.\n"
-        f"{hint}\n\n"
-        "1) пришлите новое описание (жирный, ссылки и т.д. сохранятся) или напишите «шаблон»\n"
-        "2) перешлите любой пост из канала-назначения или ссылку t.me/…/123\n"
-        "по желанию число — сколько постов максимум, «все» — без лимита\n"
+        "ставлю новое описание на ВСЕ медиа-посты канала, с самого свежего.\n"
+        "и на пустые, и на те, где описание уже есть.\n"
+        "подпись будет под фото/видео. ⏹ Стоп правки — остановить.\n\n"
+        "1) пришлите новое описание (форматирование сохранится)\n"
+        "2) пришлите ссылку на канал (t.me/channel) или на любой пост\n"
         "/cancel — отмена"
     )
 
@@ -606,15 +594,21 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
     point = forwarded_point(message)
     parsed_limit = parse_backfill_limit(text)
 
-    if point or (text and "t.me/" in text.lower()):
-        if not point:
-            parsed = parse_start_link(text)
-            dest, start_id = parsed.chat, parsed.message_id
-        else:
+    if point or (text and ("t.me/" in text.lower() or text.startswith("@") or text.startswith("-100"))):
+        if point:
             dest, start_id = point.chat, point.message_id
+        else:
+            parsed = parse_channel_or_post(text)
+            dest, start_id = parsed.chat, parsed.message_id
         if dest and dest != win.dest:
             await db.update_window(win.id, dest=dest)
             win = await db.current_window()
+        if not start_id and hasattr(db, "list_dest_message_ids"):
+            try:
+                known = await db.list_dest_message_ids(win.dest)
+                start_id = max(known) if known else 0
+            except Exception:
+                start_id = 0
         await state.update_data(bf_start=start_id)
         if editor and win.dest:
             rights = await editor.check_rights(win.dest)
@@ -642,17 +636,24 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
     if not caption:
         caption = win.caption
     if not start_id:
-        await message.answer(
-            "описание есть. теперь перешлите любой пост из канала или пришлите ссылку на него."
-            if caption
-            else "пришлите описание (с форматированием) или «шаблон», затем ссылку на пост."
-        )
-        return
+        if caption and win.dest:
+            start_id = 1
+        else:
+            await message.answer(
+                "описание есть. теперь пришлите ссылку на канал или любой пост."
+                if caption
+                else "пришлите новое описание, затем ссылку на канал."
+            )
+            return
     if not caption:
         await message.answer("есть пост. теперь пришлите новое описание или «шаблон».")
         return
 
     await state.clear()
+    await db.update_window(win.id, caption=caption)
+    if win.dest:
+        await db.update_window(win.id, dest=win.dest)
+    win = await db.current_window()
     await _run_backfill(message, poster, win, start_id, caption, limit)
 
 
@@ -661,9 +662,8 @@ async def _run_backfill(message: Message, poster: Poster, win, start_id: int, ca
         await message.answer("правка существующих уже идёт. ⏹ Стоп правки — остановить", reply_markup=keyboard())
         return
     status = await message.answer(
-        "ставлю описания под фото/видео. сначала посты без подписи.\n"
-        "в сетке медиа подписи нет — смотрите открытый пост.\n"
-        "⏹ Стоп правки — остановить."
+        "ставлю новое описание на все медиа с самого свежего поста, включая уже с подписью.\n"
+        "подпись будет под фото/видео. ⏹ Стоп правки — остановить."
         if limit == 0
         else f"правлю до {limit} постов в фоне. ⏹ Стоп правки — остановить."
     )

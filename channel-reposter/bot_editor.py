@@ -62,20 +62,29 @@ class BotEditor:
             )
         return BotRights(False, f"бот в чате, но не админ. {await self.hint()}")
 
-    async def edit_caption(self, chat: str, message_id: int, caption: str) -> str:
+    async def edit_caption(self, chat: str, message_id: int, caption: str, media_only: bool = False) -> str:
         text = normalize_caption_html(caption or "")
         if len(text) > CAPTION_LIMIT:
             raise RuntimeError(f"подпись длиннее {CAPTION_LIMIT} символов")
         parse = ParseMode.HTML if text else None
         try:
-            return await self._edit_caption_once(chat, message_id, text, parse)
+            return await self._edit_caption_once(chat, message_id, text, parse, media_only=media_only)
         except TelegramBadRequest as exc:
             message = (exc.message or "").lower()
             if "can't parse entities" in message or "unsupported start tag" in message:
-                return await self._edit_caption_once(chat, message_id, _strip_html(text), None)
+                return await self._edit_caption_once(
+                    chat, message_id, _strip_html(text), None, media_only=media_only
+                )
             raise
 
-    async def _edit_caption_once(self, chat: str, message_id: int, text: str, parse: ParseMode | None) -> str:
+    async def _edit_caption_once(
+        self,
+        chat: str,
+        message_id: int,
+        text: str,
+        parse: ParseMode | None,
+        media_only: bool = False,
+    ) -> str:
         try:
             edited = await self._with_retry(
                 self.bot.edit_message_caption,
@@ -95,6 +104,8 @@ class BotEditor:
             if "message is not modified" in message:
                 return "текст тот же — Telegram ничего не менял"
             if "there is no caption" in message or "message can't be edited" in message:
+                if media_only:
+                    raise RuntimeError("у этого куска альбома нет поля подписи") from exc
                 return await self._edit_as_text(chat, message_id, text, parse, exc)
             raise RuntimeError(_humanize(exc.message, await self.hint())) from exc
         except TelegramForbiddenError as exc:

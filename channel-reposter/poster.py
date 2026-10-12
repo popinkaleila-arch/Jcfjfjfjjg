@@ -339,41 +339,41 @@ class Poster:
             rights = await self.editor.check_rights(window.dest)
             if not rights.ok:
                 raise RuntimeError(rights.detail)
-            known_ok: set[int] = set()
-            stale: list[int] = []
-            if hasattr(self.db, "list_dest_captions"):
+            if start <= 1 and hasattr(self.db, "list_dest_message_ids"):
                 try:
-                    for message_id, old in await self.db.list_dest_captions(window.dest):
-                        mid = int(message_id)
-                        if (old or "").strip() == caption:
-                            known_ok.add(mid)
-                        else:
-                            stale.append(mid)
+                    known = await self.db.list_dest_message_ids(window.dest)
+                    if known:
+                        start = max(int(item) for item in known)
                 except Exception:
-                    log.warning("не смог прочитать журнал подписей")
-            result.same = len(known_ok)
-            seen.update(known_ok)
-            seen.update(stale)
-            log.info(
-                "caption backfill %s start=%s already=%s stale=%s",
-                window.dest,
-                start,
-                len(known_ok),
-                len(stale),
-            )
+                    pass
+            start = max(1, start)
+            log.info("caption backfill %s from newest=%s, rewrite all media", window.dest, start)
             if progress:
                 await progress(result)
             if not result.stopped and (limit == 0 or result.updated < limit):
                 await self._scan_ids(
-                    window, caption, _iter_ids(start, -1), result, limit, progress, seen, use_miss=True
+                    window,
+                    caption,
+                    _iter_ids(start, 1),
+                    result,
+                    limit,
+                    progress,
+                    seen,
+                    use_miss=True,
+                    miss_needs_hit=False,
                 )
-            if not result.stopped and (limit == 0 or result.updated < limit):
+            if not result.stopped and (limit == 0 or result.updated < limit) and start > 1:
                 await self._scan_ids(
-                    window, caption, _iter_ids(start + 1, 1), result, limit, progress, seen, use_miss=True
+                    window,
+                    caption,
+                    _iter_ids(start - 1, -1),
+                    result,
+                    limit,
+                    progress,
+                    seen,
+                    use_miss=True,
+                    miss_needs_hit=True,
                 )
-            if not result.stopped and stale and (limit == 0 or result.updated < limit):
-                stale_seen = set(known_ok)
-                await self._scan_ids(window, caption, stale, result, limit, progress, stale_seen, use_miss=False)
             result.waiting = 0
             return result
         finally:
@@ -390,6 +390,7 @@ class Poster:
         progress,
         seen: set[int],
         use_miss: bool,
+        miss_needs_hit: bool = True,
     ) -> None:
         miss = 0
         hits = 0
@@ -426,7 +427,7 @@ class Poster:
                 hits += 1
                 if len(result.errors) < 8:
                     result.errors.append(f"{message_id}: {kind}")
-            if use_miss and hits and miss >= BACKFILL_MISS_STREAK:
+            if use_miss and miss >= BACKFILL_MISS_STREAK and (hits or not miss_needs_hit):
                 return
             if progress and (kind == "ok" or result.scanned % 15 == 0):
                 await progress(result)
@@ -441,7 +442,7 @@ class Poster:
     async def _edit_one_existing(self, window: Window, message_id: int, html: str) -> str:
         assert self.editor and window.dest
         try:
-            status = await self.editor.edit_caption(window.dest, message_id, html)
+            status = await self.editor.edit_caption(window.dest, message_id, html, media_only=True)
             if "тот же" in (status or "").lower():
                 return "same"
             await self._remember(window, message_id, None, html)

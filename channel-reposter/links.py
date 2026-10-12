@@ -69,6 +69,15 @@ def parse_start_link(text: str) -> StartPoint:
     return StartPoint(chat=chat, message_id=int(match.group("mid")))
 
 
+def parse_channel_or_post(text: str) -> StartPoint:
+    value = (text or "").strip()
+    match = TME_RE.search(value)
+    if match:
+        return parse_start_link(value)
+    chat = normalize_chat(value)
+    return StartPoint(chat=chat, message_id=0)
+
+
 def parse_duration(text: str) -> int:
     value = (text or "").strip().lower().replace(" ", "")
     if not value:

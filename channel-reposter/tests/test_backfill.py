@@ -52,7 +52,7 @@ class FakeEditor:
     async def check_rights(self, chat: str):
         return SimpleNamespace(ok=True, detail="ok")
 
-    async def edit_caption(self, chat: str, message_id: int, html: str) -> str:
+    async def edit_caption(self, chat: str, message_id: int, html: str, media_only: bool = False) -> str:
         if message_id in self.skip:
             raise RuntimeError("у этого куска альбома нет поля подписи")
         if message_id not in self.existing:
@@ -67,10 +67,10 @@ class StoppingEditor(FakeEditor):
         self.poster_slot = poster_slot
         self.after = after
 
-    async def edit_caption(self, chat: str, message_id: int, html: str) -> str:
+    async def edit_caption(self, chat: str, message_id: int, html: str, media_only: bool = False) -> str:
         if len(self.edited) >= self.after:
             self.poster_slot[0].stop_backfill.set()
-        return await super().edit_caption(chat, message_id, html)
+        return await super().edit_caption(chat, message_id, html, media_only=media_only)
 
 
 def test_iter_ids_down() -> None:
@@ -147,8 +147,7 @@ async def _unknown_posts_before_stale() -> None:
     poster = Poster(db, SimpleNamespace(), editor)
     poster.backfill_delay = 0
     result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
-    assert editor.edited[0] in {2, 5}
-    assert editor.edited[-1] == 40
+    assert editor.edited[0] == 40
     assert set(editor.edited) == {2, 5, 40}
     assert result.updated == 3
 
@@ -182,9 +181,9 @@ async def _skips_posts_that_already_have_caption() -> None:
     poster = Poster(db, SimpleNamespace(), editor)
     poster.backfill_delay = 0
     result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
-    assert set(editor.edited) == {2, 5}
-    assert result.updated == 2
-    assert result.same >= 2
+    assert set(editor.edited) == existing
+    assert result.updated == 4
+    assert editor.edited[0] == 40
 
 
 def test_not_modified_counts_as_same() -> None:
@@ -192,7 +191,7 @@ def test_not_modified_counts_as_same() -> None:
 
 
 class SameEditor(FakeEditor):
-    async def edit_caption(self, chat: str, message_id: int, html: str) -> str:
+    async def edit_caption(self, chat: str, message_id: int, html: str, media_only: bool = False) -> str:
         if message_id not in self.existing:
             raise RuntimeError("пост не найден")
         self.edited.append(message_id)
