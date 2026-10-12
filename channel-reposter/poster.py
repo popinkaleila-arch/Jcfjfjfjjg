@@ -407,7 +407,14 @@ class Poster:
                 return
             if message_id in seen:
                 continue
-            kind = await self._edit_one_existing(window, message_id, caption)
+            try:
+                kind = await asyncio.wait_for(
+                    self._edit_one_existing(window, message_id, caption),
+                    timeout=25,
+                )
+            except asyncio.TimeoutError:
+                kind = "таймаут Telegram"
+                log.warning("правка %s зависла, пропускаю", message_id)
             seen.add(message_id)
             result.scanned += 1
             result.current_id = message_id
@@ -449,6 +456,7 @@ class Poster:
 
     async def _edit_one_existing(self, window: Window, message_id: int, html: str) -> str:
         assert self.editor and window.dest
+        log.info("правка %s/%s", window.dest, message_id)
         try:
             status = await self.editor.edit_caption(window.dest, message_id, html, media_only=True)
             if "тот же" in (status or "").lower():
