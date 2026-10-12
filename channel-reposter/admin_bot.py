@@ -658,6 +658,7 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
 
 
 async def _run_backfill(message: Message, poster: Poster, win, start_id: int, caption: str, limit: int) -> None:
+    db = message.bot.workflow["db"]  # type: ignore[attr-defined]
     if poster.caption_edit_active():
         await message.answer("правка существующих уже идёт. ⏹ Стоп правки — остановить", reply_markup=keyboard())
         return
@@ -673,13 +674,15 @@ async def _run_backfill(message: Message, poster: Poster, win, start_id: int, ca
             extra = " (остановка…)" if poster.stop_backfill.is_set() else ""
             wait = f" жду Telegram {result.waiting}с." if getattr(result, "waiting", 0) else ""
             await status.edit_text(
-                f"иду{extra}: поставлено {result.updated}, уже было {getattr(result, 'same', 0)}, "
-                f"просмотрено {result.scanned}, пропущено {result.skipped}, ошибок {result.failed}.{wait}\n"
-                "подпись видно при открытии поста, под картинкой.\n"
-                "⏹ Стоп правки — остановить"
+                f"иду{extra}: пост {getattr(result, 'current_id', 0)}\n"
+                f"поставлено {result.updated}, уже стояло это описание {getattr(result, 'same', 0)}, "
+                f"просмотрено {result.scanned}, пустых {result.skipped}, ошибок {result.failed}.{wait}\n"
+                "подпись под фото. ⏹ Стоп правки — остановить"
             )
         except Exception:
             pass
+
+    await db.set_setting("caption_job", "1")
 
     async def runner() -> None:
         try:
@@ -687,6 +690,11 @@ async def _run_backfill(message: Message, poster: Poster, win, start_id: int, ca
             await message.answer(_backfill_text(result), reply_markup=keyboard())
         except Exception as exc:
             await message.answer(f"не вышло: {exc}", reply_markup=keyboard())
+        finally:
+            try:
+                await db.set_setting("caption_job", "0")
+            except Exception:
+                pass
 
     poster.backfill_task = asyncio.create_task(runner())
 

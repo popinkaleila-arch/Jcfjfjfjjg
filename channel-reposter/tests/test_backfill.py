@@ -165,6 +165,20 @@ async def _miss_streak_waits_for_first_hit() -> None:
     assert result.updated == 1
 
 
+def test_down_from_newest_after_short_gap() -> None:
+    asyncio.run(_down_from_newest_after_short_gap())
+
+
+async def _down_from_newest_after_short_gap() -> None:
+    editor = FakeEditor(existing={10, 11, 12})
+    poster = Poster(MemoryDb(), SimpleNamespace(), editor)
+    poster.backfill_delay = 0
+    result = await poster.backfill_via_bot(make_window(), start_id=12, html="new")
+    assert editor.edited[:3] == [12, 11, 10]
+    assert result.updated == 3
+    assert result.skipped < 25
+
+
 def test_idle_stop_is_false() -> None:
     poster = Poster(MemoryDb(), SimpleNamespace(), FakeEditor())
     assert poster.request_stop_backfill() is False

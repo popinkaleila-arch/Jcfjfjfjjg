@@ -18,8 +18,9 @@ from transfer_filters import album_is_clean, should_skip
 CAPTION_LIMIT = 1024
 BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
-BACKFILL_MISS_STREAK = 60
-BACKFILL_DELAY = 2.0
+BACKFILL_MISS_STREAK = 80
+BACKFILL_DELAY = 1.6
+UPWARD_PROBE = 8
 
 log = logging.getLogger("poster")
 
@@ -33,6 +34,7 @@ class BackfillResult:
     failed: int = 0
     stopped: bool = False
     waiting: int = 0
+    current_id: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -361,6 +363,7 @@ class Poster:
                     seen,
                     use_miss=True,
                     miss_needs_hit=False,
+                    streak=UPWARD_PROBE,
                 )
             if not result.stopped and (limit == 0 or result.updated < limit) and start > 1:
                 await self._scan_ids(
@@ -391,9 +394,11 @@ class Poster:
         seen: set[int],
         use_miss: bool,
         miss_needs_hit: bool = True,
+        streak: int | None = None,
     ) -> None:
         miss = 0
         hits = 0
+        miss_limit = streak if streak is not None else BACKFILL_MISS_STREAK
         for message_id in ids:
             if self.stop_backfill.is_set():
                 result.stopped = True
@@ -405,6 +410,7 @@ class Poster:
             kind = await self._edit_one_existing(window, message_id, caption)
             seen.add(message_id)
             result.scanned += 1
+            result.current_id = message_id
             result.waiting = 0
             if kind == "ok":
                 result.updated += 1
@@ -427,15 +433,17 @@ class Poster:
                 hits += 1
                 if len(result.errors) < 8:
                     result.errors.append(f"{message_id}: {kind}")
-            if use_miss and miss >= BACKFILL_MISS_STREAK and (hits or not miss_needs_hit):
+            if use_miss and miss >= miss_limit and (hits or not miss_needs_hit):
                 return
             if progress and (kind == "ok" or result.scanned % 15 == 0):
                 await progress(result)
             delay = 0
             if kind == "ok":
                 delay = self.backfill_delay
-            elif kind in {"miss", "skip", "same"}:
-                delay = min(0.35, self.backfill_delay) if self.backfill_delay else 0
+            elif kind == "miss":
+                delay = 0.05 if self.backfill_delay else 0
+            elif kind in {"skip", "same"}:
+                delay = min(0.25, self.backfill_delay) if self.backfill_delay else 0
             if delay:
                 await asyncio.sleep(delay)
 
