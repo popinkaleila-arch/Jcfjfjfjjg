@@ -137,6 +137,35 @@ async def _stop_backfill_halts_walk() -> None:
     assert poster.request_stop_backfill() is False
 
 
+def test_unknown_posts_before_stale() -> None:
+    asyncio.run(_unknown_posts_before_stale())
+
+
+async def _unknown_posts_before_stale() -> None:
+    editor = FakeEditor(existing={2, 5, 40})
+    db = MemoryDb(captions={40: "OLD"})
+    poster = Poster(db, SimpleNamespace(), editor)
+    poster.backfill_delay = 0
+    result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
+    assert editor.edited[0] in {2, 5}
+    assert editor.edited[-1] == 40
+    assert set(editor.edited) == {2, 5, 40}
+    assert result.updated == 3
+
+
+def test_miss_streak_waits_for_first_hit() -> None:
+    asyncio.run(_miss_streak_waits_for_first_hit())
+
+
+async def _miss_streak_waits_for_first_hit() -> None:
+    editor = FakeEditor(existing={2})
+    poster = Poster(MemoryDb(), SimpleNamespace(), editor)
+    poster.backfill_delay = 0
+    result = await poster.backfill_via_bot(make_window(), start_id=80, html="cap")
+    assert editor.edited == [2]
+    assert result.updated == 1
+
+
 def test_idle_stop_is_false() -> None:
     poster = Poster(MemoryDb(), SimpleNamespace(), FakeEditor())
     assert poster.request_stop_backfill() is False
@@ -153,8 +182,9 @@ async def _skips_posts_that_already_have_caption() -> None:
     poster = Poster(db, SimpleNamespace(), editor)
     poster.backfill_delay = 0
     result = await poster.backfill_via_bot(make_window(), start_id=40, html="<b>x</b>")
-    assert set(editor.edited) == existing
-    assert result.updated == 4
+    assert set(editor.edited) == {2, 5}
+    assert result.updated == 2
+    assert result.same >= 2
 
 
 def test_not_modified_counts_as_same() -> None:

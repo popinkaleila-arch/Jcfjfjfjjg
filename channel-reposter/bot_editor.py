@@ -93,8 +93,6 @@ class BotEditor:
         except TelegramBadRequest as exc:
             message = (exc.message or "").lower()
             if "message is not modified" in message:
-                if text:
-                    return await self._force_caption_below(chat, message_id, text, parse)
                 return "текст тот же — Telegram ничего не менял"
             if "there is no caption" in message or "message can't be edited" in message:
                 return await self._edit_as_text(chat, message_id, text, parse, exc)

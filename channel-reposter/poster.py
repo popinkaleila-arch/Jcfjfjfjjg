@@ -10,17 +10,16 @@ from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified, RPC
 
 import config
 from bot_editor import BotEditor
-from formatting import normalize_caption_html
 from bridge import UserbotBridge
 from database import Database, Window
-from formatting import compose_dest_caption, media_fingerprint
+from formatting import compose_dest_caption, media_fingerprint, normalize_caption_html
 from transfer_filters import album_is_clean, should_skip
 
 CAPTION_LIMIT = 1024
 BACKFILL_MAX = 800
 SOURCE_INDEX_LIMIT = 3000
 BACKFILL_MISS_STREAK = 60
-BACKFILL_DELAY = 3.0
+BACKFILL_DELAY = 2.0
 
 log = logging.getLogger("poster")
 
@@ -340,12 +339,41 @@ class Poster:
             rights = await self.editor.check_rights(window.dest)
             if not rights.ok:
                 raise RuntimeError(rights.detail)
+            known_ok: set[int] = set()
+            stale: list[int] = []
+            if hasattr(self.db, "list_dest_captions"):
+                try:
+                    for message_id, old in await self.db.list_dest_captions(window.dest):
+                        mid = int(message_id)
+                        if (old or "").strip() == caption:
+                            known_ok.add(mid)
+                        else:
+                            stale.append(mid)
+                except Exception:
+                    log.warning("не смог прочитать журнал подписей")
+            result.same = len(known_ok)
+            seen.update(known_ok)
+            seen.update(stale)
+            log.info(
+                "caption backfill %s start=%s already=%s stale=%s",
+                window.dest,
+                start,
+                len(known_ok),
+                len(stale),
+            )
             if progress:
                 await progress(result)
             if not result.stopped and (limit == 0 or result.updated < limit):
-                await self._scan_ids(window, caption, _iter_ids(start, -1), result, limit, progress, seen, use_miss=True)
+                await self._scan_ids(
+                    window, caption, _iter_ids(start, -1), result, limit, progress, seen, use_miss=True
+                )
             if not result.stopped and (limit == 0 or result.updated < limit):
-                await self._scan_ids(window, caption, _iter_ids(start + 1, 1), result, limit, progress, seen, use_miss=True)
+                await self._scan_ids(
+                    window, caption, _iter_ids(start + 1, 1), result, limit, progress, seen, use_miss=True
+                )
+            if not result.stopped and stale and (limit == 0 or result.updated < limit):
+                stale_seen = set(known_ok)
+                await self._scan_ids(window, caption, stale, result, limit, progress, stale_seen, use_miss=False)
             result.waiting = 0
             return result
         finally:
@@ -364,6 +392,7 @@ class Poster:
         use_miss: bool,
     ) -> None:
         miss = 0
+        hits = 0
         for message_id in ids:
             if self.stop_backfill.is_set():
                 result.stopped = True
@@ -379,21 +408,25 @@ class Poster:
             if kind == "ok":
                 result.updated += 1
                 miss = 0
+                hits += 1
             elif kind == "same":
                 result.same += 1
                 miss = 0
+                hits += 1
             elif kind == "miss":
                 result.skipped += 1
                 miss += 1
             elif kind == "skip":
                 result.skipped += 1
                 miss = 0
+                hits += 1
             else:
                 result.failed += 1
                 miss = 0
+                hits += 1
                 if len(result.errors) < 8:
                     result.errors.append(f"{message_id}: {kind}")
-            if use_miss and miss >= BACKFILL_MISS_STREAK:
+            if use_miss and hits and miss >= BACKFILL_MISS_STREAK:
                 return
             if progress and (kind == "ok" or result.scanned % 15 == 0):
                 await progress(result)

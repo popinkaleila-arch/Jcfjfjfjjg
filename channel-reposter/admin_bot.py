@@ -559,6 +559,16 @@ async def ask_backfill(message: Message, state: FSMContext) -> None:
                 f"{rights.detail}"
             )
             return
+    if win.dest and win.caption:
+        known = []
+        if hasattr(db, "list_dest_message_ids"):
+            try:
+                known = await db.list_dest_message_ids(win.dest)
+            except Exception:
+                known = []
+        start_id = (max(known) if known else 8000) + 40
+        await _run_backfill(message, poster, win, start_id, win.caption, 0)
+        return
     await state.set_state(Form.backfill)
     await state.update_data(bf_caption="", bf_start=0, bf_limit=0)
     hint = "есть шаблон ✏️ Описание — можно сразу прислать пост" if win.caption else "шаблона нет — сначала пришлите новое описание"
@@ -643,12 +653,15 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
+    await _run_backfill(message, poster, win, start_id, caption, limit)
+
+
+async def _run_backfill(message: Message, poster: Poster, win, start_id: int, caption: str, limit: int) -> None:
     if poster.caption_edit_active():
         await message.answer("правка существующих уже идёт. ⏹ Стоп правки — остановить", reply_markup=keyboard())
         return
-
     status = await message.answer(
-        "ставлю описания под фото/видео.\n"
+        "ставлю описания под фото/видео. сначала посты без подписи.\n"
         "в сетке медиа подписи нет — смотрите открытый пост.\n"
         "⏹ Стоп правки — остановить."
         if limit == 0
@@ -662,7 +675,7 @@ async def collect_backfill(message: Message, state: FSMContext) -> None:
             await status.edit_text(
                 f"иду{extra}: поставлено {result.updated}, уже было {getattr(result, 'same', 0)}, "
                 f"просмотрено {result.scanned}, пропущено {result.skipped}, ошибок {result.failed}.{wait}\n"
-                "подпись видно при открытии поста.\n"
+                "подпись видно при открытии поста, под картинкой.\n"
                 "⏹ Стоп правки — остановить"
             )
         except Exception:

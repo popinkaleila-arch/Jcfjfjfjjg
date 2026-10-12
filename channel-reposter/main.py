@@ -100,6 +100,49 @@ async def heartbeat_loop(db: Database, bridge: UserbotBridge, bot: Bot) -> None:
         await asyncio.sleep(60)
 
 
+async def resume_caption_backfill(db: Database, poster: Poster, bot: Bot) -> None:
+    win = await db.current_window()
+    if not win.dest or not win.caption or poster.caption_edit_active():
+        return
+    known = []
+    if hasattr(db, "list_dest_message_ids"):
+        try:
+            known = await db.list_dest_message_ids(win.dest)
+        except Exception:
+            known = []
+    start = (max(known) if known else 8000) + 40
+
+    async def runner() -> None:
+        log.info("auto caption backfill %s from %s", win.dest, start)
+        try:
+            result = await poster.backfill_via_bot(win, start, win.caption)
+            log.info(
+                "auto caption done scanned=%s updated=%s same=%s skipped=%s",
+                result.scanned,
+                result.updated,
+                result.same,
+                result.skipped,
+            )
+        except Exception:
+            log.exception("auto caption backfill")
+
+    poster.backfill_task = asyncio.create_task(runner(), name="caption-backfill")
+    try:
+        admins = set(config.ADMIN_IDS) | set(await db.get_admin_ids())
+        text = (
+            f"ставлю описания на остальные посты {win.dest}.\n"
+            "сначала посты без подписи, потом старые кривые.\n"
+            "⏹ Стоп правки — остановить."
+        )
+        for admin_id in admins:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:
+                log.warning("не смог написать админу %s", admin_id)
+    except Exception:
+        log.exception("auto caption notify")
+
+
 async def amain() -> None:
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан")
@@ -125,6 +168,7 @@ async def amain() -> None:
     log.info("Admin panel @%s", me.username)
     log.info("Pyrogram worker loop started")
     log.info("Online https://t.me/%s", me.username)
+    await resume_caption_backfill(db, poster, bot)
     stop = asyncio.Event()
 
     def _stop(*_args: object) -> None:
