@@ -10,6 +10,7 @@ from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified, RPC
 
 import config
 from bot_editor import BotEditor
+from logs import caption_event, caption_note, caption_report, dump_report, flush_logs
 from bridge import UserbotBridge
 from database import Database, Window
 from formatting import compose_dest_caption, media_fingerprint, normalize_caption_html
@@ -341,6 +342,8 @@ class Poster:
         try:
             rights = await self.editor.check_rights(window.dest)
             if not rights.ok:
+                caption_note(f"нет прав {window.dest}: {rights.detail}")
+                flush_logs()
                 raise RuntimeError(rights.detail)
             if start <= 1 and hasattr(self.db, "list_dest_message_ids"):
                 try:
@@ -363,6 +366,10 @@ class Poster:
                 window.dest,
                 start,
                 result.same,
+            )
+            caption_note(
+                f"старт {window.dest} с id {start}, уже с этим текстом {result.same}, "
+                f"длина подписи {len(caption)}"
             )
             if progress:
                 await progress(result)
@@ -393,6 +400,7 @@ class Poster:
                     use_miss=False,
                 )
             result.waiting = 0
+            await self._store_caption_report(window.dest, start, caption, result)
             return result
         finally:
             self.editor.on_wait = previous_wait
@@ -430,6 +438,7 @@ class Poster:
                 )
             except asyncio.TimeoutError:
                 kind = "таймаут Telegram"
+                caption_event(str(window.dest), message_id, "fail", "таймаут Telegram")
                 log.warning("правка %s зависла, пропускаю", message_id)
             seen.add(message_id)
             result.scanned += 1
@@ -462,6 +471,12 @@ class Poster:
                 return
             if progress and (kind == "ok" or result.scanned % 15 == 0):
                 await progress(result)
+            if result.scanned and result.scanned % 100 == 0:
+                caption_note(
+                    f"ход {window.dest}/{message_id} поставлено={result.updated} "
+                    f"уже={result.same} пустых={result.skipped} ошибок={result.failed} "
+                    f"просмотрено={result.scanned}"
+                )
             delay = 0
             if kind == "ok":
                 delay = self.backfill_delay
@@ -477,15 +492,19 @@ class Poster:
         try:
             status = await self.editor.edit_caption(window.dest, message_id, html, media_only=True)
             if "тот же" in (status or "").lower():
+                caption_event(window.dest, message_id, "same", "текст уже стоит")
                 return "same"
             await self._remember(window, message_id, None, html)
+            caption_event(window.dest, message_id, "ok", "подпись поставлена")
             log.info("описание поста %s/%s обновлено", window.dest, message_id)
             return "ok"
         except Exception as exc:
             text = str(exc).lower()
             if "не найден" in text or "not found" in text:
+                caption_event(window.dest, message_id, "miss", "поста нет")
                 return "miss"
             if "тот же" in text or "not modified" in text:
+                caption_event(window.dest, message_id, "same", "текст уже стоит")
                 return "same"
             if (
                 "нет поля подписи" in text
@@ -493,10 +512,35 @@ class Poster:
                 or "не даёт править" in text
                 or "can't be edited" in text
             ):
+                caption_event(window.dest, message_id, "skip", "нет поля подписи")
                 return "skip"
             if "прав" in text or "administrator" in text or "admin" in text:
+                caption_event(window.dest, message_id, "fail", text)
                 raise
+            caption_event(window.dest, message_id, "fail", text)
             return str(exc)
+
+    async def _store_caption_report(self, dest: str, start_id: int, caption: str, result: BackfillResult) -> None:
+        payload = {
+            "dest": dest,
+            "start_id": start_id,
+            "last_id": result.current_id,
+            "updated": result.updated,
+            "same": result.same,
+            "skipped": result.skipped,
+            "failed": result.failed,
+            "scanned": result.scanned,
+            "stopped": result.stopped,
+            "errors": result.errors[:5],
+            "caption_len": len(caption),
+        }
+        caption_note(caption_report(payload).replace("\n", " | "))
+        flush_logs()
+        if hasattr(self.db, "set_setting"):
+            try:
+                await self.db.set_setting("caption_last", dump_report(payload))
+            except Exception:
+                log.warning("не сохранил итог правки описаний")
 
     async def edit_caption(self, chat: str, message_id: int, caption: str, prefer_bot: bool = True) -> str:
         text = caption or ""

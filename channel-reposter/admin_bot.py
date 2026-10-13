@@ -15,6 +15,7 @@ from bot_editor import BotEditor
 from bridge import UserbotBridge
 from database import Database
 from formatting import message_to_html
+from logs import caption_report, load_report
 from links import (
     format_chat,
     format_duration,
@@ -115,6 +116,7 @@ async def status_text(
         f"фильтр: {'чистый' if current.clean_filter else 'все посты'}",
         f"бот правит подписи: {'вкл' if current.bot_edit else 'выкл'}",
         f"правка описаний: {'идёт — ⏹ Стоп правки остановит' if poster and poster.caption_edit_active() else 'нет'}",
+        caption_report(load_report(await db.get_setting("caption_last", ""))),
         f"очередь≈{queued}  всего={posted}",
         f"источник: {format_chat(current.source)}",
         f"назначение: {format_chat(current.dest)}",
@@ -527,6 +529,10 @@ def _is_stop_all(text: str) -> bool:
 
 async def _stop_caption_edit(message: Message, also_autopost: bool = False) -> None:
     db, bridge, _auth, poster, _editor = _ctx(message)
+    logging.getLogger("caption").info(
+        "стоп правки от админа, автопост=%s",
+        "да" if also_autopost else "нет",
+    )
     stopped_edit = poster.request_stop_backfill()
     if also_autopost:
         bridge.stop_cycle.set()

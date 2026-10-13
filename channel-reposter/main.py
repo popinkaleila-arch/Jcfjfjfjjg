@@ -18,12 +18,12 @@ from scheduling import due_windows, next_run
 from single_instance import SingleInstance
 from userbot_auth import UserbotAuth
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+from logs import setup_logging
+
+_log_dir = config.DATABASE_PATH.parent / "logs"
+setup_logging(_log_dir)
 log = logging.getLogger("main")
+log.info("логи: %s", _log_dir)
 
 
 async def scheduler_loop(db: Database, bridge: UserbotBridge, poster: Poster) -> None:
