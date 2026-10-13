@@ -50,18 +50,27 @@ def caption_report(payload: dict) -> str:
     if not payload:
         return "последняя правка описаний: ещё не было"
     state = "остановлена" if payload.get("stopped") else "готова"
+    bits = [
+        f"поставлено {payload.get('updated', 0)}",
+        f"уже было {payload.get('same', 0)}",
+    ]
+    if "skipped" in payload:
+        bits.append(f"пустых {payload.get('skipped', 0)}")
+    if "failed" in payload:
+        bits.append(f"ошибок {payload.get('failed', 0)}")
+    if "scanned" in payload:
+        bits.append(f"просмотрено {payload.get('scanned', 0)}")
     lines = [
         f"последняя правка описаний: {state}",
-        (
-            f"поставлено {payload.get('updated', 0)}, уже было {payload.get('same', 0)}, "
-            f"пустых {payload.get('skipped', 0)}, ошибок {payload.get('failed', 0)}, "
-            f"просмотрено {payload.get('scanned', 0)}"
-        ),
+        ", ".join(bits),
         f"диапазон {payload.get('start_id', '—')} → {payload.get('last_id', '—')}",
     ]
     errors = payload.get("errors") or []
     if errors:
         lines.append("ошибки: " + "; ".join(str(item) for item in errors[:3]))
+    note = payload.get("note")
+    if note:
+        lines.append(str(note))
     return "\n".join(lines)
 
 

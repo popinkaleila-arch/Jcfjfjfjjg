@@ -181,16 +181,28 @@ async def amain() -> None:
         asyncio.create_task(heartbeat_loop(db, bridge, bot), name="heartbeat"),
     ]
     stopper = asyncio.create_task(stop.wait())
-    done, pending = await asyncio.wait({*tasks, stopper}, return_when=asyncio.FIRST_COMPLETED)
-    for task in tasks:
-        task.cancel()
-    await dp.stop_polling()
-    await bridge.disconnect()
-    await bot.session.close()
-    await db.close()
+    _done, pending = await asyncio.wait({*tasks, stopper}, return_when=asyncio.FIRST_COMPLETED)
+    for task in [*tasks, *pending]:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        await dp.stop_polling()
+    except RuntimeError:
+        log.info("polling уже остановлен")
+    try:
+        await bridge.disconnect()
+    except Exception:
+        log.exception("юзербот не отключился")
+    try:
+        await bot.session.close()
+    except Exception:
+        log.exception("сессия бота не закрылась")
+    try:
+        await db.close()
+    except Exception:
+        log.exception("база не закрылась")
     lock.release()
-    for task in pending:
-        task.cancel()
     log.info("остановлен")
 
 

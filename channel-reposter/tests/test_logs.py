@@ -27,6 +27,7 @@ def test_caption_report_roundtrip() -> None:
     }
     text = caption_report(payload)
     assert "поставлено 4" in text
+    assert "пустых 2" in text
     assert "просмотрено 20" in text
     assert "100 → 3" in text
     assert "9: flood" in text
@@ -34,6 +35,14 @@ def test_caption_report_roundtrip() -> None:
     assert load_report(dump_report(payload))["updated"] == 4
     assert load_report("не json") == {}
     assert load_report("[1]") == {}
+
+
+def test_caption_report_omits_unknown_counters() -> None:
+    text = caption_report({"updated": 5848, "same": 689, "scanned": 5971, "note": "проход до поста 3"})
+    assert "пустых" not in text
+    assert "ошибок" not in text
+    assert "проход до поста 3" in text
+    assert "просмотрено 5971" in text
 
 
 def test_caption_report_stopped() -> None:
